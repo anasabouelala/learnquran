@@ -1,0 +1,7 @@
+{
+  "name": "Hifz Quest: Arcade Edition",
+  "description": "A gamified, arcade-style Quran memorization companion for children powered by Gemini.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
