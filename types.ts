@@ -33,8 +33,9 @@ export interface AssemblyFragment {
 }
 
 export interface SurferData {
-    words: string[]; // Correct sequence of words for the verses
-    distractors: string[]; // Pool of wrong words
+  words: string[]; // Correct sequence of words for the verses
+  distractors: string[]; // Pool of wrong words
+  wordChallenges?: { word: string, distractors: string[] }[]; // Specific mapping (Survivor Game)
 }
 
 export interface Question {
@@ -53,11 +54,13 @@ export interface Question {
   hint?: string; // Contextual meaning of the next verse
   wordDistractors?: string[]; // Similar words to the first word
   memorizationTip?: string; // Structural pattern or guide
-  
+
   // Quiz Specific
   explanation?: string; // Tafseer or detailed context
-  quizSubType?: 'VOCABULARY' | 'TAFSEER' | 'THEME' | 'PRECISION'; // Type of quiz question
-  
+  quizSubType?: 'VOCABULARY' | 'TAFSEER' | 'THEME' | 'PRECISION' | 'SCENARIO' | 'PUZZLE' | 'CONNECTION' | 'ORDER'; // Type of quiz question
+  scenario?: string; // For SCENARIO type
+  emojis?: string; // For PUZZLE type
+
   // Verse Assembler Data
   assemblyData?: {
     fragments: AssemblyFragment[];
@@ -68,7 +71,7 @@ export interface Question {
 
   // Stack Data
   stackData?: {
-      words: string[];
+    words: string[];
   }
 }
 
@@ -95,7 +98,7 @@ export interface DiagnosticMetrics {
 export interface DiagnosticResult {
   surahName: string;
   startVerse: number;
-  endVerse?: number; 
+  endVerse?: number;
   overallScore: number; // 0-100
   metrics: DiagnosticMetrics;
   mistakes: DiagnosticMistake[];
@@ -123,6 +126,7 @@ export interface SurahStats {
   lastPlayed: number; // Timestamp
   gamesPlayed: number;
   versesMastered: number; // Count of verses passed perfectly
+  masteredVersesList?: number[]; // List of specific mastered verses
 }
 
 export interface UserGoal {
@@ -141,4 +145,14 @@ export interface GlobalStats {
   lastLoginDate: string; // ISO Date string for streak calc
   achievements: string[]; // IDs of unlocked achievements
   goals: UserGoal[];
+}
+
+export interface UserProfile {
+  name: string;
+  email: string;
+  level: number;
+  xp: number;
+  streak: number;
+  badges: string[];
+  // Add other fields as needed
 }

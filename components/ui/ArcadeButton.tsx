@@ -5,15 +5,15 @@ interface ArcadeButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement
   size?: 'sm' | 'md' | 'lg';
 }
 
-export const ArcadeButton: React.FC<ArcadeButtonProps> = ({ 
-  children, 
-  variant = 'primary', 
-  size = 'md', 
-  className = '', 
-  ...props 
+export const ArcadeButton: React.FC<ArcadeButtonProps> = ({
+  children,
+  variant = 'primary',
+  size = 'md',
+  className = '',
+  ...props
 }) => {
-  const baseStyles = "relative font-arcade uppercase transition-all duration-100 active:translate-y-1 border-b-4 rounded-xl focus:outline-none";
-  
+  const baseStyles = "relative font-arcade uppercase transition-all duration-100 active:translate-y-1 border-b-4 rounded-xl focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed disabled:active:translate-y-0 disabled:shadow-none";
+
   const variants = {
     primary: "bg-arcade-cyan border-cyan-700 text-white hover:brightness-110 shadow-[0_0_15px_rgba(6,182,212,0.5)]",
     secondary: "bg-arcade-purple border-purple-900 text-white hover:brightness-110 shadow-[0_0_15px_rgba(107,33,168,0.5)]",
@@ -28,7 +28,7 @@ export const ArcadeButton: React.FC<ArcadeButtonProps> = ({
   };
 
   return (
-    <button 
+    <button
       className={`${baseStyles} ${variants[variant]} ${sizes[size]} ${className}`}
       {...props}
     >

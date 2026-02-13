@@ -1,7 +1,6 @@
-
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Layers, Trophy, Heart, Play, Home, Sparkles } from 'lucide-react';
+import { Layers, Trophy, Zap } from 'lucide-react';
 import { Question } from '../../types';
 import { ArcadeButton } from '../ui/ArcadeButton';
 
@@ -11,83 +10,122 @@ interface Props {
   onGameEnd: (victory: boolean) => void;
 }
 
-interface Block {
+interface StackBlock {
   id: string;
   word: string;
-  width: number; // Percentage
-  left: number; // Percentage
-  colorTheme: BlockTheme;
+  width: number;
+  left: number;
+  top: number;
+  colorIndex: number;
   isPerfect: boolean;
-}
-
-interface BlockTheme {
-  bg: string;
-  border: string;
-  glow: string;
 }
 
 interface Debris {
   id: string;
   width: number;
   left: number;
-  bottom: number;
-  theme: BlockTheme;
+  top: number;
 }
 
-const BLOCK_HEIGHT = 60; // px
+const BLOCK_HEIGHT = 60;
+const CONTAINER_HEIGHT = 600;
 const INITIAL_SPEED = 40; // % per second
-const PERFECT_TOLERANCE = 3; // %
+const SPEED_INCREMENT = 5;
+const MAX_SPEED = 120;
+const PERFECT_TOLERANCE = 2;
 
-const THEMES: BlockTheme[] = [
-  { bg: 'bg-emerald-500', border: 'border-emerald-700', glow: 'shadow-emerald-500/50' },
-  { bg: 'bg-cyan-500', border: 'border-cyan-700', glow: 'shadow-cyan-500/50' },
-  { bg: 'bg-blue-500', border: 'border-blue-700', glow: 'shadow-blue-500/50' },
-  { bg: 'bg-indigo-500', border: 'border-indigo-700', glow: 'shadow-indigo-500/50' },
-  { bg: 'bg-violet-500', border: 'border-violet-700', glow: 'shadow-violet-500/50' },
-  { bg: 'bg-fuchsia-500', border: 'border-fuchsia-700', glow: 'shadow-fuchsia-500/50' },
-  { bg: 'bg-rose-500', border: 'border-rose-700', glow: 'shadow-rose-500/50' },
-  { bg: 'bg-orange-500', border: 'border-orange-700', glow: 'shadow-orange-500/50' },
+const COLORS = [
+  'bg-emerald-500',
+  'bg-cyan-500',
+  'bg-blue-500',
+  'bg-indigo-500',
+  'bg-violet-500',
+  'bg-fuchsia-500',
+  'bg-rose-500',
+  'bg-orange-500',
 ];
 
 export const QuranStackGame: React.FC<Props> = ({ surahName, question, onGameEnd }) => {
-  // --- STATE ---
   const [gameState, setGameState] = useState<'START' | 'PLAYING' | 'GAME_OVER' | 'VICTORY'>('START');
   const [score, setScore] = useState(0);
   const [combo, setCombo] = useState(0);
-  const [lives, setLives] = useState(1); // One life in stacker usually, but lets keep it generic
-  
-  // Visual Feedback
-  const [feedback, setFeedback] = useState<{text: string, color: string, id: number} | null>(null);
-
-  // Game Data
-  const [stack, setStack] = useState<Block[]>([]);
+  const [level, setLevel] = useState(0);
+  const [stack, setStack] = useState<StackBlock[]>([]);
   const [debris, setDebris] = useState<Debris[]>([]);
-  
-  // Active Block State (React state for rendering the element, Ref for physics)
-  const [activeBlock, setActiveBlock] = useState<{word: string, width: number, theme: BlockTheme} | null>(null);
-  
-  // --- REFS ---
-  const physics = useRef({
+  const [activeWord, setActiveWord] = useState('');
+  const [activeWidth, setActiveWidth] = useState(60);
+  const [activeColorIndex, setActiveColorIndex] = useState(0);
+  const [feedback, setFeedback] = useState<{ text: string, color: string, id: number } | null>(null);
+
+  // Physics refs (no re-renders during movement)
+  const physicsRef = useRef({
     left: 0,
-    direction: 1, // 1 for right, -1 for left
+    direction: 1,
     speed: INITIAL_SPEED,
     isMoving: false
   });
-  
-  const activeBlockDomRef = useRef<HTMLDivElement>(null);
+
+  const activeBlockRef = useRef<HTMLDivElement>(null);
   const requestRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
-  
   const wordsRef = useRef<string[]>([]);
   const wordIndexRef = useRef(0);
 
-  // --- INIT ---
+  // Extract words from question
+  // Helper to merge small words
+  const optimizeWordChunks = (words: string[]): string[] => {
+    if (words.length <= 1) return words;
+
+    const merged: string[] = [];
+    let buffer = "";
+
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      if (word.length <= 2) {
+        buffer = buffer ? `${buffer} ${word}` : word;
+      } else {
+        if (buffer) {
+          merged.push(`${buffer} ${word}`);
+          buffer = "";
+        } else {
+          merged.push(word);
+        }
+      }
+    }
+    if (buffer) {
+      if (merged.length > 0) {
+        merged[merged.length - 1] = `${merged[merged.length - 1]} ${buffer}`;
+      } else {
+        merged.push(buffer);
+      }
+    }
+    return merged;
+  };
+
+  // Extract words and handle continuous play
   useEffect(() => {
-    // Extract words
+    let newWords: string[] = [];
     if (question.stackData?.words) {
-      wordsRef.current = question.stackData.words;
+      newWords = question.stackData.words;
     } else {
-      wordsRef.current = question.arabicText.split(" ").filter(w => w.length > 0);
+      newWords = question.arabicText.split(' ').filter(w => w.length > 0);
+    }
+
+    // Optimize chunks (merge small words)
+    newWords = optimizeWordChunks(newWords);
+
+    wordsRef.current = newWords;
+
+    // If game is already playing (this is a new verse in continuous mode)
+    if (gameState === 'PLAYING') {
+      wordIndexRef.current = 0;
+
+      // Get width of top block to continue smoothly
+      const lastBlock = stack[stack.length - 1];
+      const nextWidth = lastBlock ? lastBlock.width : 60;
+
+      // Start spawning new words immediately on top of existing stack
+      spawnNextBlock(nextWidth, 0);
     }
   }, [question]);
 
@@ -95,117 +133,121 @@ export const QuranStackGame: React.FC<Props> = ({ surahName, question, onGameEnd
     setGameState('PLAYING');
     setScore(0);
     setCombo(0);
+    setLevel(0);
     setDebris([]);
-    setLives(1);
     wordIndexRef.current = 0;
-    
-    // Base Block
-    const baseWidth = 60;
-    const baseLeft = 20;
-    const baseBlock: Block = {
-      id: 'base',
-      word: 'البداية',
-      width: baseWidth,
-      left: baseLeft,
-      colorTheme: { bg: 'bg-slate-700', border: 'border-slate-800', glow: 'shadow-slate-500/20' },
-      isPerfect: true
-    };
-    
-    setStack([baseBlock]);
-    
-    // Spawn First Active Block
-    spawnNextBlock(baseWidth, 0);
-    
-    // Start Loop
+
+    // Start with empty stack - First word is the foundation
+    setStack([]);
+
+    // Spawn first word as active block to oscillate
+    spawnNextBlock(60, 0); // Start with 60% width
+
+    // Start animation
     lastTimeRef.current = performance.now();
-    physics.current.isMoving = true;
+    physicsRef.current.isMoving = true;
     requestRef.current = requestAnimationFrame(gameLoop);
   };
 
   const spawnNextBlock = (width: number, index: number) => {
     if (index >= wordsRef.current.length) {
-      handleVictory();
+      // Verse Completed
+      handleVictory(); // This triggers GameScreen to load next question
       return;
     }
 
     const word = wordsRef.current[index];
-    const theme = THEMES[index % THEMES.length];
-    
-    // Random start side
+    const colorIndex = index % COLORS.length;
+    const speed = Math.min(INITIAL_SPEED + (index * SPEED_INCREMENT), MAX_SPEED);
+
+    // Random start position (left or right)
     const startLeft = Math.random() > 0.5 ? 0 : (100 - width);
-    
-    physics.current.left = startLeft;
-    physics.current.direction = startLeft === 0 ? 1 : -1;
-    physics.current.speed = INITIAL_SPEED + (index * 2); // Slight speed increase
-    
-    setActiveBlock({
-      word,
-      width,
-      theme
-    });
-    
+
+    physicsRef.current.left = startLeft;
+    physicsRef.current.direction = startLeft === 0 ? 1 : -1;
+    physicsRef.current.speed = speed;
+
+    setActiveWord(word);
+    setActiveWidth(width);
+    setActiveColorIndex(colorIndex);
+    setLevel(index);
     wordIndexRef.current = index;
   };
 
-  // --- GAME LOOP ---
   const gameLoop = (time: number) => {
     if (!lastTimeRef.current) lastTimeRef.current = time;
     const delta = (time - lastTimeRef.current) / 1000;
     lastTimeRef.current = time;
 
-    if (physics.current.isMoving && activeBlockDomRef.current) {
-      let newLeft = physics.current.left + (physics.current.speed * physics.current.direction * delta);
-      
-      // Bounce Check
-      // We need to check if the block hits the edges (0 or 100-width)
-      // Since activeBlock state might be stale in closure, we use physics.current left but we assume width hasn't changed during one drop phase
-      // To be safe, we can read the width from the DOM or just rely on the spawn width which shouldn't change mid-flight.
-      // Let's rely on the physics calculation boundaries.
-      
-      const currentWidth = parseFloat(activeBlockDomRef.current.style.width) || 60; // Fallback
-      const maxLeft = 100 - currentWidth;
+    if (physicsRef.current.isMoving && activeBlockRef.current) {
+      const { left, direction, speed } = physicsRef.current;
+      let newLeft = left + (speed * direction * delta);
+      const maxLeft = 100 - activeWidth;
 
+      // Bounce at edges
       if (newLeft <= 0) {
         newLeft = 0;
-        physics.current.direction = 1;
+        physicsRef.current.direction = 1;
       } else if (newLeft >= maxLeft) {
         newLeft = maxLeft;
-        physics.current.direction = -1;
+        physicsRef.current.direction = -1;
       }
 
-      physics.current.left = newLeft;
-      activeBlockDomRef.current.style.left = `${newLeft}%`;
+      physicsRef.current.left = newLeft;
+      activeBlockRef.current.style.left = `${newLeft}%`;
     }
 
     requestRef.current = requestAnimationFrame(gameLoop);
   };
 
-  // --- INTERACTION ---
   const handleTap = () => {
-    if (gameState !== 'PLAYING' || !activeBlock) return;
+    if (gameState !== 'PLAYING' || !activeWord) return;
 
-    // 1. Get positions
-    const currentLeft = physics.current.left;
-    const currentWidth = activeBlock.width;
+    physicsRef.current.isMoving = false;
+
+    const currentLeft = physicsRef.current.left;
+    const currentWidth = activeWidth;
     const currentRight = currentLeft + currentWidth;
 
-    const prevBlock = stack[stack.length - 1];
-    const prevLeft = prevBlock.left;
-    const prevRight = prevBlock.left + prevBlock.width;
+    let prevBlock = stack[stack.length - 1];
+    let prevLeft = 0;
+    let prevRight = 0;
+    let prevWidth = 0;
+    let targetTop = 0;
 
-    // 2. Calculate Overlap
+    if (!prevBlock) {
+      // First Block Placement Logic
+      // Treated as foundation: 
+      // - Overlap check against virtual floor (or just accepted if within bounds?)
+      // - Let's say it always succeeds if it's on screen, establishing the base.
+      // - Or let's make it match against a "Virtual Base" of 100% width or specific width?
+      // User said "1st word should be at bottom... fix movement in place".
+      // Let's assume it establishes the column.
+
+      prevLeft = 0; // Virtual floor 0
+      prevRight = 100; // Virtual floor 100
+      prevWidth = 100;
+      targetTop = CONTAINER_HEIGHT; // Place at bottom
+    } else {
+      prevLeft = prevBlock.left;
+      prevRight = prevBlock.left + prevBlock.width;
+      prevWidth = prevBlock.width;
+      targetTop = prevBlock.top;
+    }
+
+    // Calculate overlap
     const overlapLeft = Math.max(currentLeft, prevLeft);
     const overlapRight = Math.min(currentRight, prevRight);
     const overlapWidth = overlapRight - overlapLeft;
 
-    // 3. Logic
     if (overlapWidth <= 0) {
-      handleGameOver();
+      // Complete miss
+      showFeedback('خطأ!', 'text-red-500');
+      setTimeout(() => handleGameOver(), 500);
       return;
     }
 
-    // Check for Perfect Alignment
-    // Delta between centers or lefts? Stacker usually uses left alignment relative to overlap.
+    // Check for perfect match
     const diff = Math.abs(currentLeft - prevLeft);
     const isPerfect = diff < PERFECT_TOLERANCE;
 
@@ -214,75 +256,64 @@ export const QuranStackGame: React.FC<Props> = ({ surahName, question, onGameEnd
 
     if (isPerfect) {
       setCombo(c => c + 1);
-      showFeedback(combo > 1 ? `COMBO x${combo + 1}` : "PERFECT!", "text-arcade-yellow");
-      // Snap to previous block's position and width (restore full width if comboing?)
-      // Classic stacker: perfect placement keeps the width. Imperfect shrinks it.
-      // Bonus: If combo > 3, maybe grow the block slightly?
-      finalLeft = prevLeft;
-      finalWidth = prevBlock.width; // Keep previous width (don't shrink due to sub-pixel aliasing)
-      
-      if (combo > 2 && finalWidth < 50) {
-           finalWidth += 2; // Small bonus growth
-           finalLeft -= 1; 
-      }
+      showFeedback(combo > 0 ? `مثالي! x${combo + 1}` : 'مثالي!', 'text-yellow-400');
+      finalWidth = prevBlock.width;
+      finalLeft = prevBlock.left;
     } else {
       setCombo(0);
-      // Slice logic
-      // Determine debris
+
+      // Create debris for overhangs
       if (currentLeft < prevLeft) {
-        // Overhang on left
         const debrisWidth = prevLeft - currentLeft;
-        addDebris(currentLeft, debrisWidth, activeBlock.theme);
-      } else {
-        // Overhang on right
+        addDebris(currentLeft, debrisWidth, prevBlock.top - BLOCK_HEIGHT);
+      }
+      if (currentRight > prevRight) {
         const debrisWidth = currentRight - prevRight;
-        addDebris(prevRight, debrisWidth, activeBlock.theme);
+        addDebris(prevRight, debrisWidth, prevBlock.top - BLOCK_HEIGHT);
       }
     }
 
-    // Add to stack
-    const newBlock: Block = {
-      id: `block-${wordIndexRef.current}`,
-      word: activeBlock.word,
+    // Add new block to stack
+    const newBlock: StackBlock = {
+      id: `block-${Date.now()}-${wordIndexRef.current}`,
+      word: activeWord,
       width: finalWidth,
       left: finalLeft,
-      colorTheme: activeBlock.theme,
+      top: prevBlock ? (prevBlock.top - BLOCK_HEIGHT) : (CONTAINER_HEIGHT - BLOCK_HEIGHT),
+      colorIndex: activeColorIndex,
       isPerfect
     };
 
     setStack(prev => [...prev, newBlock]);
-    setScore(s => s + (isPerfect ? 200 + (combo * 50) : 100));
+    setScore(s => s + (isPerfect ? 300 + (combo * 100) : 150));
 
-    // Next Turn
+    // Continue to next block
+    physicsRef.current.isMoving = true;
     spawnNextBlock(finalWidth, wordIndexRef.current + 1);
   };
 
-  const addDebris = (left: number, width: number, theme: BlockTheme) => {
+  const addDebris = (left: number, width: number, top: number) => {
     const d: Debris = {
       id: Math.random().toString(),
       left,
       width,
-      bottom: stack.length * BLOCK_HEIGHT,
-      theme
+      top
     };
     setDebris(prev => [...prev, d]);
-    // Cleanup debris after animation
     setTimeout(() => {
-        setDebris(prev => prev.filter(item => item.id !== d.id));
+      setDebris(prev => prev.filter(item => item.id !== d.id));
     }, 1000);
   };
 
   const handleGameOver = () => {
     setGameState('GAME_OVER');
-    physics.current.isMoving = false;
+    physicsRef.current.isMoving = false;
     cancelAnimationFrame(requestRef.current);
     onGameEnd(false);
   };
 
   const handleVictory = () => {
-    setGameState('VICTORY');
-    physics.current.isMoving = false;
-    cancelAnimationFrame(requestRef.current);
+    // Keep playing state for continuous transition
     onGameEnd(true);
   };
 
@@ -295,173 +326,176 @@ export const QuranStackGame: React.FC<Props> = ({ surahName, question, onGameEnd
     return () => cancelAnimationFrame(requestRef.current);
   }, []);
 
-  // --- RENDER HELPERS ---
-  // Camera Logic: Keep the active block area visible
-  // We want to see the stack grow. 
-  // We apply transform to the container.
-  // Move down by 1 BLOCK_HEIGHT for every block added after the 3rd one.
-  const cameraOffset = Math.max(0, (stack.length - 3) * BLOCK_HEIGHT);
+  const cameraOffset = Math.max(0, (stack.length - 5) * BLOCK_HEIGHT);
 
   return (
-    <div 
-        className="fixed inset-0 bg-slate-900 overflow-hidden flex flex-col font-sans touch-none select-none"
-        onPointerDown={handleTap}
+    <div
+      className="fixed inset-0 bg-slate-900 overflow-hidden flex flex-col touch-none select-none"
+      onPointerDown={handleTap}
     >
-        {/* --- BACKGROUND --- */}
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_#1e293b_0%,_#0f172a_100%)] z-0"></div>
-        <div className="absolute inset-0 opacity-20 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] z-0 pointer-events-none"></div>
+      <div className="absolute inset-0 bg-gradient-to-b from-slate-800 to-slate-900" />
 
-        {/* --- HUD --- */}
-        <div className="absolute top-0 left-0 w-full p-6 z-40 flex justify-between items-start pointer-events-none">
-            <div>
-                 <div className="flex items-center gap-2 mb-1">
-                    <Trophy className="w-5 h-5 text-arcade-yellow" />
-                    <span className="text-3xl font-arcade text-white drop-shadow-md">{score}</span>
-                </div>
-                {combo > 1 && (
-                    <motion.div 
-                        initial={{ scale: 0 }} animate={{ scale: 1 }}
-                        className="text-arcade-cyan font-arcade text-sm uppercase tracking-widest"
-                    >
-                        Combo x{combo}
-                    </motion.div>
-                )}
+      {/* HUD */}
+      <div className="absolute top-0 left-0 w-full p-4 z-40 flex justify-between items-start pointer-events-none">
+        <div>
+          <div className="flex items-center gap-2">
+            <Trophy className="w-5 h-5 text-yellow-400" />
+            <span className="text-3xl font-arcade text-white">{score}</span>
+          </div>
+          {combo > 0 && (
+            <div className="text-cyan-400 font-arcade text-sm mt-1">
+              مثالي x{combo}
             </div>
-
-            <div className="bg-slate-900/50 backdrop-blur border border-slate-600 px-4 py-2 rounded-full">
-                 <span className="text-slate-200 font-arabic">{surahName}</span>
-            </div>
+          )}
         </div>
 
-        {/* --- FEEDBACK POPUP --- */}
-        <AnimatePresence>
-            {feedback && (
-                <motion.div
-                    key={feedback.id}
-                    initial={{ opacity: 0, scale: 0.5, y: 0 }}
-                    animate={{ opacity: 1, scale: 1.5, y: -100 }}
-                    exit={{ opacity: 0 }}
-                    className={`absolute top-1/3 left-1/2 -translate-x-1/2 z-50 font-arcade text-4xl font-bold ${feedback.color} drop-shadow-[0_4px_4px_rgba(0,0,0,0.5)] whitespace-nowrap pointer-events-none`}
-                >
-                    {feedback.text}
-                </motion.div>
-            )}
-        </AnimatePresence>
-
-        {/* --- GAME CONTAINER --- */}
-        <div className="relative w-full max-w-lg mx-auto h-full z-10 perspective-1000">
-             
-             {/* Scrolling Wrapper */}
-             <div 
-                className="absolute bottom-0 w-full transition-transform duration-500 ease-out"
-                style={{ transform: `translateY(${cameraOffset}px)` }}
-             >
-                 {/* Stack Blocks */}
-                 {stack.map((block, index) => (
-                     <motion.div 
-                        key={block.id}
-                        initial={{ opacity: 0, scale: 0.9 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        className={`absolute h-[60px] flex items-center justify-center transition-all
-                            ${block.colorTheme.bg} 
-                            border-b-[6px] ${block.colorTheme.border}
-                            ${block.isPerfect ? `z-20 ring-2 ring-white ${block.colorTheme.glow}` : 'z-10'}
-                            rounded-md
-                        `}
-                        style={{
-                            width: `${block.width}%`,
-                            left: `${block.left}%`,
-                            bottom: `${index * BLOCK_HEIGHT + 40}px` // +40px base margin
-                        }}
-                     >
-                         <span className={`font-arabic text-xl md:text-2xl truncate px-2 ${block.isPerfect ? 'text-white font-bold drop-shadow-md' : 'text-white/90'}`}>
-                             {block.word}
-                         </span>
-                         {block.isPerfect && <Sparkles className="absolute -top-3 -right-3 w-5 h-5 text-yellow-300 animate-spin-slow" />}
-                     </motion.div>
-                 ))}
-
-                 {/* Debris */}
-                 {debris.map((d) => (
-                     <div 
-                        key={d.id}
-                        className={`absolute h-[60px] ${d.theme.bg} opacity-80 rounded-sm animate-[fallDebris_0.8s_ease-in_forwards] border-b-[6px] ${d.theme.border}`}
-                        style={{
-                            width: `${d.width}%`,
-                            left: `${d.left}%`,
-                            bottom: `${d.bottom + 40}px`
-                        }}
-                     />
-                 ))}
-
-                 {/* Active Block */}
-                 {activeBlock && (
-                     <div
-                        ref={activeBlockDomRef}
-                        className={`absolute h-[60px] flex items-center justify-center rounded-md shadow-2xl z-30
-                             bg-white border-b-[6px] border-slate-300
-                        `}
-                        style={{
-                            width: `${activeBlock.width}%`,
-                            // left is controlled by loop
-                            bottom: `${stack.length * BLOCK_HEIGHT + 40}px`
-                        }}
-                     >
-                         <div className={`absolute inset-0 opacity-20 ${activeBlock.theme.bg}`}></div>
-                         <span className="relative z-10 text-slate-900 font-bold font-arabic text-xl md:text-2xl">
-                             {activeBlock.word}
-                         </span>
-                         
-                         {/* Guide Lines for Precision */}
-                         <div className="absolute top-0 bottom-0 left-0 w-0.5 bg-black/10"></div>
-                         <div className="absolute top-0 bottom-0 right-0 w-0.5 bg-black/10"></div>
-                     </div>
-                 )}
-
-                 {/* Floor */}
-                 <div className="absolute bottom-0 w-full h-10 bg-slate-800 border-t-4 border-slate-600"></div>
-             </div>
+        <div className="flex items-center gap-2 bg-slate-800/80 px-3 py-2 rounded-lg">
+          <Zap className="w-4 h-4 text-orange-400" />
+          <span className="text-white font-arcade text-sm">المستوى {level + 1}</span>
         </div>
 
-        {/* --- START SCREEN OVERLAY --- */}
-        {gameState === 'START' && (
-            <div className="absolute inset-0 bg-slate-900/90 z-50 flex flex-col items-center justify-center p-8 text-center backdrop-blur-sm">
-                <div className="w-20 h-20 bg-emerald-500/20 rounded-2xl flex items-center justify-center mb-6 border-2 border-emerald-500 animate-pulse">
-                    <Layers className="w-10 h-10 text-emerald-400" />
-                </div>
-                <h1 className="text-5xl font-arcade text-white mb-2 tracking-wide">STACKER</h1>
-                <h2 className="text-xl font-arabic text-emerald-400 mb-8">برج القرآن</h2>
-                
-                <div className="space-y-4 mb-8 text-slate-300 text-sm max-w-xs mx-auto">
-                    <div className="flex items-center gap-3 bg-slate-800 p-3 rounded-lg border border-slate-700">
-                        <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
-                        <p>اضغط لتثبيت المكعب فوق البرج</p>
-                    </div>
-                    <div className="flex items-center gap-3 bg-slate-800 p-3 rounded-lg border border-slate-700">
-                        <div className="w-2 h-2 rounded-full bg-yellow-500"></div>
-                        <p>التطابق التام يمنحك نقاط مضاعفة</p>
-                    </div>
-                    <div className="flex items-center gap-3 bg-slate-800 p-3 rounded-lg border border-slate-700">
-                        <div className="w-2 h-2 rounded-full bg-red-500"></div>
-                        <p>الأجزاء الزائدة سيتم قصها!</p>
-                    </div>
-                </div>
+        <div className="bg-slate-800/80 px-4 py-2 rounded-lg">
+          <span className="text-slate-200 font-arabic">{surahName}</span>
+        </div>
+      </div>
 
-                <ArcadeButton onClick={startGame} size="lg" className="w-full max-w-xs animate-bounce-short">
-                    ابدأ اللعب
-                </ArcadeButton>
-            </div>
+      {/* Feedback */}
+      <AnimatePresence>
+        {feedback && (
+          <motion.div
+            key={feedback.id}
+            initial={{ opacity: 0, scale: 0.5, y: 0 }}
+            animate={{ opacity: 1, scale: 1.5, y: -80 }}
+            exit={{ opacity: 0 }}
+            className={`absolute top-1/3 left-1/2 -translate-x-1/2 z-50 font-arcade text-3xl font-bold ${feedback.color} drop-shadow-lg pointer-events-none`}
+          >
+            {feedback.text}
+          </motion.div>
         )}
+      </AnimatePresence>
 
-        <style>{`
-            @keyframes fallDebris {
-                0% { transform: translateY(0) rotate(0deg); opacity: 0.8; }
-                100% { transform: translateY(400px) rotate(15deg); opacity: 0; }
-            }
-            .animate-spin-slow {
-                animation: spin 3s linear infinite;
-            }
-        `}</style>
+      {/* Game Container */}
+      <div className="relative w-full max-w-md mx-auto flex-1 flex items-center justify-center">
+        <div
+          className="relative w-full bg-slate-800/30 border-x-2 border-slate-700"
+          style={{ height: `${CONTAINER_HEIGHT}px` }}
+        >
+          <div
+            className="absolute inset-0 transition-transform duration-300"
+            style={{ transform: `translateY(${cameraOffset}px)` }}
+          >
+            {/* Stack */}
+            {stack.map((block) => (
+              <motion.div
+                key={block.id}
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                className={`absolute h-[60px] flex items-center justify-center rounded-lg border-b-4 ${block.colorIndex >= 0 ? COLORS[block.colorIndex] : 'bg-slate-700'
+                  } ${block.isPerfect ? 'ring-2 ring-white shadow-lg' : ''}`}
+                style={{
+                  width: `${block.width}%`,
+                  left: `${block.left}%`,
+                  top: `${block.top}px`
+                }}
+              >
+                <span className="font-arabic text-xl text-white font-bold truncate px-2">
+                  {block.word}
+                </span>
+              </motion.div>
+            ))}
+
+            {/* Debris */}
+            {debris.map((d) => (
+              <motion.div
+                key={d.id}
+                initial={{ opacity: 0.8 }}
+                animate={{ y: 400, opacity: 0, rotate: 20 }}
+                transition={{ duration: 0.8, ease: 'easeIn' }}
+                className="absolute h-[60px] bg-red-500/60 rounded"
+                style={{
+                  width: `${d.width}%`,
+                  left: `${d.left}%`,
+                  top: `${d.top}px`
+                }}
+              />
+            ))}
+
+            {/* Active Block */}
+            {activeWord && gameState === 'PLAYING' && (
+              <div
+                ref={activeBlockRef}
+                className={`absolute h-[60px] flex items-center justify-center rounded-lg shadow-2xl border-4 border-white ${COLORS[activeColorIndex]
+                  }`}
+                style={{
+                  width: `${activeWidth}%`,
+                  left: `${physicsRef.current.left}%`,
+                  bottom: `${stack.length * BLOCK_HEIGHT}px`
+                }}
+              >
+                {/* Text Handling for Small Blocks */}
+                {activeWidth < 20 ? (
+                  // Floating Bubble Style for small blocks
+                  <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-white/90 px-3 py-1 rounded shadow-lg whitespace-nowrap z-20">
+                    <span className="font-arabic text-xl text-slate-900 font-bold">
+                      {activeWord}
+                    </span>
+                    <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[6px] border-l-transparent border-t-[8px] border-t-white/90 border-r-[6px] border-r-transparent"></div>
+                  </div>
+                ) : (
+                  // Standard Inside Style
+                  <span className="font-arabic text-xl text-white font-bold truncate px-2">
+                    {activeWord}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Start Screen */}
+      {gameState === 'START' && (
+        <div className="absolute inset-0 bg-slate-900/95 z-50 flex flex-col items-center justify-center p-8 backdrop-blur">
+          <div className="w-20 h-20 bg-emerald-500/20 rounded-2xl flex items-center justify-center mb-6 border-2 border-emerald-500">
+            <Layers className="w-10 h-10 text-emerald-400" />
+          </div>
+          <h1 className="text-5xl font-arcade text-white mb-2">STACKER</h1>
+          <h2 className="text-xl font-arabic text-emerald-400 mb-8">برج القرآن</h2>
+
+          <div className="space-y-3 mb-8 text-slate-300 text-sm max-w-xs">
+            <div className="flex items-center gap-3 bg-slate-800 p-3 rounded-lg">
+              <div className="w-2 h-2 rounded-full bg-emerald-500" />
+              <p>المكعبات تتحرك يميناً ويساراً</p>
+            </div>
+            <div className="flex items-center gap-3 bg-slate-800 p-3 rounded-lg">
+              <div className="w-2 h-2 rounded-full bg-yellow-500" />
+              <p>اضغط عندما يتطابق المكعب مع السابق!</p>
+            </div>
+            <div className="flex items-center gap-3 bg-slate-800 p-3 rounded-lg">
+              <div className="w-2 h-2 rounded-full bg-red-500" />
+              <p>الأجزاء الزائدة سيتم قصها</p>
+            </div>
+          </div>
+
+          <ArcadeButton onClick={startGame} size="lg" className="w-full max-w-xs">
+            ابدأ اللعب
+          </ArcadeButton>
+        </div>
+      )}
+      {/* Game Over Screen (Internal) */}
+      {gameState === 'GAME_OVER' && (
+        <div className="absolute inset-0 bg-slate-900/90 z-50 flex flex-col items-center justify-center p-8 backdrop-blur">
+          <h2 className="text-4xl font-arcade text-red-500 mb-4">سقط البرج!</h2>
+          <div className="text-white text-center mb-8">
+            <p className="text-xl mb-2">النقاط: {score}</p>
+          </div>
+          <div className="flex gap-4">
+            <ArcadeButton onClick={startGame} variant="primary">
+              محاولة أخرى
+            </ArcadeButton>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

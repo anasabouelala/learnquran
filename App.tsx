@@ -10,10 +10,10 @@ import { GameState, GameMode } from './types';
 const App: React.FC = () => {
   const [appState, setAppState] = useState<GameState>(GameState.MENU);
   const [selectedSurah, setSelectedSurah] = useState<string>("");
-  const [verseRange, setVerseRange] = useState<{start: number, end?: number}>({start: 1});
+  const [verseRange, setVerseRange] = useState<{ start: number, end?: number }>({ start: 1 });
   const [selectedGameMode, setSelectedGameMode] = useState<GameMode>('CLASSIC');
   const [gameConfig, setGameConfig] = useState<any>({});
-  
+
   // State for passing deep link props to Menu
   const [menuInitialState, setMenuInitialState] = useState<{
     step: 'SELECT_MODE',
@@ -24,16 +24,20 @@ const App: React.FC = () => {
   const handleStartGame = (surah: string, startVerse: number = 1, endVerse?: number, mode: GameMode = 'CLASSIC', config?: any) => {
     setSelectedSurah(surah);
     setVerseRange({
-        start: startVerse,
-        end: endVerse
+      start: startVerse,
+      end: endVerse
     });
     setSelectedGameMode(mode);
     setGameConfig(config || {});
     setAppState(GameState.PLAYING);
   };
 
-  const handleStartDiagnostic = (surah: string) => {
+  const handleStartDiagnostic = (surah: string, startVerse: number = 1, endVerse?: number) => {
     setSelectedSurah(surah);
+    setVerseRange({
+      start: startVerse,
+      end: endVerse
+    });
     setAppState(GameState.DIAGNOSTIC);
   };
 
@@ -41,9 +45,9 @@ const App: React.FC = () => {
     // Instead of forcing CLASSIC, we go back to MENU but in SELECT_MODE state
     // with the specific range derived from diagnosis.
     setMenuInitialState({
-        step: 'SELECT_MODE',
-        surah: surah,
-        range: { start: startVerse, end: endVerse }
+      step: 'SELECT_MODE',
+      surah: surah,
+      range: { start: startVerse, end: endVerse }
     });
     setAppState(GameState.MENU);
   };
@@ -62,37 +66,39 @@ const App: React.FC = () => {
   return (
     <div className="antialiased font-sans text-white">
       {appState === GameState.MENU && (
-          <MainMenu 
-            onStartGame={handleStartGame} 
-            onStartDiagnostic={handleStartDiagnostic}
-            onOpenDashboard={handleOpenDashboard}
-            initialState={menuInitialState}
-          />
+        <MainMenu
+          onStartGame={handleStartGame}
+          onStartDiagnostic={handleStartDiagnostic}
+          onOpenDashboard={handleOpenDashboard}
+          initialState={menuInitialState}
+        />
       )}
 
       {appState === GameState.DASHBOARD && (
-          <DashboardScreen 
-            onBack={handleExit}
-          />
+        <DashboardScreen
+          onBack={handleExit}
+        />
       )}
-      
+
       {appState === GameState.DIAGNOSTIC && (
-          <DiagnosticScreen 
-            targetSurah={selectedSurah}
-            onDiagnosticComplete={handleDiagnosticComplete}
-            onBack={handleExit}
-          />
+        <DiagnosticScreen
+          targetSurah={selectedSurah}
+          startVerse={verseRange.start}
+          endVerse={verseRange.end}
+          onDiagnosticComplete={handleDiagnosticComplete}
+          onBack={handleExit}
+        />
       )}
 
       {appState === GameState.PLAYING && (
-          <GameScreen 
-            surahName={selectedSurah} 
-            initialVerse={verseRange.start}
-            endVerse={verseRange.end}
-            gameMode={selectedGameMode}
-            config={gameConfig}
-            onExit={handleExit} 
-          />
+        <GameScreen
+          surahName={selectedSurah}
+          initialVerse={verseRange.start}
+          endVerse={verseRange.end}
+          gameMode={selectedGameMode}
+          config={gameConfig}
+          onExit={handleExit}
+        />
       )}
     </div>
   );

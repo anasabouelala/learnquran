@@ -1,5 +1,5 @@
 {
-  "name": "hifz-quest:-arcade-edition",
+  "name": "hifz-quest-arcade-edition",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,12 +9,17 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@google/genai": "^1.40.0",
+    "@google/generative-ai": "^0.24.1",
+    "concurrently": "^9.2.1",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.4",
+    "express": "^5.2.1",
     "framer-motion": "11.13.1",
     "lucide-react": "0.469.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "recharts": "2.15.0"
+    "recharts": "2.15.0",
+    "@supabase/supabase-js": "^2.49.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

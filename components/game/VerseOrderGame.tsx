@@ -14,10 +14,10 @@ export const VerseOrderGame: React.FC<Props> = ({ question, onAnswer }) => {
 
   // Determine the target list of words
   const targetWords = useMemo(() => {
-      if (question.words && question.words.length > 0) return question.words;
-      // Fallback: use arabicText or correctAnswer split by spaces
-      const text = question.correctAnswer || question.arabicText || "";
-      return text.split(' ').filter(w => w.trim().length > 0);
+    if (question.words && question.words.length > 0) return question.words;
+    // Fallback: use arabicText or correctAnswer split by spaces
+    const text = question.correctAnswer || question.arabicText || "";
+    return text.split(' ').filter(w => w.trim().length > 0);
   }, [question]);
 
   useEffect(() => {
@@ -44,8 +44,8 @@ export const VerseOrderGame: React.FC<Props> = ({ question, onAnswer }) => {
 
   const checkAnswer = () => {
     // Compare selectedWords with targetWords
-    const isCorrect = selectedWords.length === targetWords.length && 
-                      selectedWords.every((val, index) => val === targetWords[index]);
+    const isCorrect = selectedWords.length === targetWords.length &&
+      selectedWords.every((val, index) => val === targetWords[index]);
     onAnswer(isCorrect);
   };
 
@@ -55,30 +55,30 @@ export const VerseOrderGame: React.FC<Props> = ({ question, onAnswer }) => {
 
       {/* Target Area */}
       <div className="w-full min-h-[120px] bg-slate-800/80 rounded-2xl border-2 border-dashed border-slate-500 p-4 flex flex-wrap gap-3 justify-center items-center rtl-text">
-         <AnimatePresence>
-            {selectedWords.length === 0 && (
-              <span className="text-slate-500 font-arcade text-xs absolute">Tap words below to build the verse</span>
-            )}
-            {selectedWords.map((word, idx) => (
-              <motion.button
-                key={`${word}-${idx}`}
-                layoutId={`word-${word}-${idx}`}
-                initial={{ scale: 0 }}
-                animate={{ scale: 1 }}
-                exit={{ scale: 0 }}
-                onClick={() => handleSelectedClick(word, idx)}
-                className="bg-arcade-yellow text-arcade-dark font-arabic text-2xl px-4 py-2 rounded-lg shadow-lg hover:bg-yellow-400"
-              >
-                {word}
-              </motion.button>
-            ))}
-         </AnimatePresence>
+        <AnimatePresence>
+          {selectedWords.length === 0 && (
+            <span className="text-slate-500 font-arcade text-xs absolute">Tap words below to build the verse</span>
+          )}
+          {selectedWords.map((word, idx) => (
+            <motion.button
+              key={`${word}-${idx}`}
+              layoutId={`word-${word}-${idx}`}
+              initial={{ scale: 0 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0 }}
+              onClick={() => handleSelectedClick(word, idx)}
+              className="bg-arcade-yellow text-arcade-dark font-arabic text-2xl px-4 py-2 rounded-lg shadow-lg hover:bg-yellow-400"
+            >
+              {word}
+            </motion.button>
+          ))}
+        </AnimatePresence>
       </div>
 
       {/* Source Area */}
       <div className="flex flex-wrap gap-4 justify-center py-6 rtl-text">
         {availableWords.map((word, idx) => (
-           <motion.button
+          <motion.button
             key={`${word}-${idx}-source`}
             layout
             initial={{ opacity: 0, y: 20 }}
@@ -92,9 +92,9 @@ export const VerseOrderGame: React.FC<Props> = ({ question, onAnswer }) => {
       </div>
 
       <div className="mt-8">
-        <ArcadeButton 
-          variant="primary" 
-          size="lg" 
+        <ArcadeButton
+          variant="primary"
+          size="lg"
           onClick={checkAnswer}
           disabled={availableWords.length > 0}
           className={availableWords.length > 0 ? 'opacity-50 cursor-not-allowed' : ''}

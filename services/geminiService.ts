@@ -1,581 +1,987 @@
-import { GoogleGenAI, Type } from "@google/genai";
-import { LevelData, QuestionType, DiagnosticResult, GameMode } from "../types";
 
-// Fallback data
-const FALLBACK_LEVEL: LevelData = {
-  surahName: "البقرة",
-  questions: [
-    {
-      id: "v1",
-      verseNumber: 2,
-      type: QuestionType.VERSE_ASSEMBLY,
-      prompt: "رتب أجزاء الآية بشكل صحيح",
-      arabicText: "ذَلِكَ الْكِتَابُ لاَ رَيْبَ فِيهِ هُدًى لِّلْمُتَّقِينَ",
-      hint: "بداية وصف الكتاب.",
-      memorizationTip: "الآية تتكون من ثلاث جمل مترابطة.",
-      points: 300,
-      assemblyData: {
-        fragments: [
-            { id: "f1", text: "ذَلِكَ الْكِتَابُ", type: 'CORRECT', orderIndex: 0 },
-            { id: "f2", text: "لاَ رَيْبَ فِيهِ", type: 'CORRECT', orderIndex: 1 },
-            { id: "f3", text: "هُدًى لِّلْمُتَّقِينَ", type: 'CORRECT', orderIndex: 2 },
-            { id: "d1", text: "لَا شَكَّ فِيهِ", type: 'DISTRACTOR', orderIndex: -1 }
-        ]
-      }
-    }
-  ]
+import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
+import { LevelData, QuestionType, DiagnosticResult, GameMode } from "../types";
+import { TAHA_QUIZ_DATA } from "../components/data/surahTahaQuestions";
+
+// --- Configuration ---
+const getApiKey = (): string | undefined => {
+    const envKey = import.meta.env.VITE_API_KEY;
+    const localKey = localStorage.getItem('GEMINI_API_KEY');
+
+    const key = envKey || localKey || undefined;
+
+    // Debug logging
+    console.log("[API KEY] Source:", envKey ? "ENV" : (localKey ? "localStorage" : "NONE"));
+    console.log("[API KEY] Key (masked):", key ? key.substring(0, 10) + "..." : "undefined");
+
+    return key;
 };
 
-// Helper for retry logic
-async function retry<T>(fn: () => Promise<T>, retries = 2, delay = 1000): Promise<T> {
-  try {
-    return await fn();
-  } catch (error) {
-    if (retries <= 0) throw error;
-    await new Promise(resolve => setTimeout(resolve, delay));
-    return retry(fn, retries - 1, delay * 2);
-  }
+// --- DATA: Surah Mapping for Public API ---
+const SURAH_LIST = [
+    "الفاتحة", "البقرة", "آل عمران", "النساء", "المائدة", "الأنعام", "الأعراف", "الأنفال", "التوبة", "يونس",
+    "هود", "يوسف", "الرعد", "إبراهيم", "الحجر", "النحل", "الإسراء", "الكهف", "مريم", "طه",
+    "الأنبياء", "الحج", "المؤمنون", "النور", "الفرقان", "الشعراء", "النمل", "القصص", "العنكبوت", "الروم",
+    "لقمان", "السجدة", "الأحزاب", "سبأ", "فاطر", "يس", "الصافات", "ص", "الزمر", "غافر",
+    "فصلت", "الشورى", "الزخرف", "الدخان", "الجاثية", "الأحقاف", "محمد", "الفتح", "الحجرات", "ق",
+    "الذاريات", "الطور", "النجم", "القمر", "الرحمن", "الواقعة", "الحديد", "المجادلة", "الحشر", "الممتحنة",
+    "الصف", "الجمعة", "المنافقون", "التغابن", "الطلاق", "التحريم", "الملك", "القلم", "الحاقة", "المعارج",
+    "نوح", "الجن", "المزمل", "المدثر", "القيامة", "الإنسان", "المرسلات", "النبأ", "النازعات", "عبس",
+    "التكوير", "الانفطار", "المطففين", "الانشقاق", "البروج", "الطارق", "الأعلى", "الغاشية", "الفجر", "البلد",
+    "الشمس", "الليل", "الضحى", "الشرح", "التين", "العلق", "القدر", "البينة", "الزلزلة", "العاديات",
+    "القارعة", "التكاثر", "العصر", "الهمزة", "الفيل", "قريش", "الماعون", "الكوثر", "الكافرون", "النصر",
+    "المسد", "الإخلاص", "الفلق", "الناس"
+];
+
+const getSurahNumber = (name: string): number => {
+    const index = SURAH_LIST.findIndex(s => s === name || name.includes(s));
+    return index !== -1 ? index + 1 : 1;
+};
+
+// --- MODEL FALLBACK STRATEGY (Shared) ---
+const MODELS_TO_TRY = [
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash-exp",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro",
+    "gemini-1.0-pro"
+];
+
+// --- PER-MODEL RATE LIMIT TRACKING ---
+// Free tier quota is PER-MODEL (e.g. 20 req/day for gemini-2.5-flash).
+// So if one model hits 429, we skip it and try the next model (which has its own quota).
+const exhaustedModels: Map<string, number> = new Map(); // model -> timestamp when it was exhausted
+
+function isModelExhausted(modelName: string): boolean {
+    const until = exhaustedModels.get(modelName);
+    if (!until) return false;
+    if (Date.now() > until) {
+        exhaustedModels.delete(modelName); // Expired, allow retry
+        return false;
+    }
+    return true;
 }
 
-export const analyzeRecitation = async (input: { text?: string, audioBase64?: string, targetSurah?: string }): Promise<DiagnosticResult> => {
-    if (!process.env.API_KEY) {
-        return {
-            surahName: "البقرة",
-            startVerse: 1,
-            endVerse: 5,
-            overallScore: 85,
-            metrics: { memorization: 90, tajweed: 80, pronunciation: 85 },
-            mistakes: [
-                { 
-                    type: 'PRONUNCIATION', 
-                    verse: 1, 
-                    text: "الم", 
-                    description: "تمديد المد اللازم غير كافٍ",
-                    advice: "اجعل المد 6 حركات كاملة (طول النفس العميق)." 
-                }
-            ],
-            diagnosis: "محاكاة: تلاوة جيدة مع بعض الملاحظات في المدود.",
-            identifiedText: "الم"
-        };
-    }
-    
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+function markModelExhausted(modelName: string, retryAfterSec?: number) {
+    const waitMs = (retryAfterSec || 60) * 1000;
+    exhaustedModels.set(modelName, Date.now() + waitMs);
+    console.warn(`🛑 [Rate Limit] Model ${modelName} exhausted. Skipping for ${retryAfterSec || 60}s.`);
+}
 
-    // Fixed: Using plain object for responseSchema as per guidelines
-    const schema = {
-        type: Type.OBJECT,
-        properties: {
-            surahName: { type: Type.STRING },
-            startVerse: { type: Type.INTEGER, description: "The verse number where the student should START practicing." },
-            endVerse: { type: Type.INTEGER, description: "The verse number where the student should STOP practicing." },
-            overallScore: { type: Type.INTEGER, description: "Overall score out of 100." },
-            metrics: {
-                type: Type.OBJECT,
-                properties: {
-                    memorization: { type: Type.INTEGER, description: "Accuracy of words and sequence (0-100). Penalize heavily for missing verses." },
-                    tajweed: { type: Type.INTEGER, description: "Adherence to Tajweed rules (0-100)." },
-                    pronunciation: { type: Type.INTEGER, description: "Clarity and Makharij (0-100)." }
-                },
-                required: ["memorization", "tajweed", "pronunciation"]
-            },
-            mistakes: {
-                type: Type.ARRAY,
-                items: {
-                    type: Type.OBJECT,
-                    properties: {
-                        type: { type: Type.STRING, enum: ["MEMORIZATION", "TAJWEED", "PRONUNCIATION"] },
-                        verse: { type: Type.INTEGER },
-                        text: { type: Type.STRING, description: "The specific word or phrase involved." },
-                        correction: { type: Type.STRING, description: "The correct form (if applicable) or the MISSING text." },
-                        description: { type: Type.STRING, description: "Brief explanation of the mistake in Arabic." },
-                        advice: { type: Type.STRING, description: "Actionable steps to fix this specific mistake (e.g., tongue position, repetition strategy)." }
-                    },
-                    required: ["type", "verse", "text", "description", "advice"]
+// Check if ALL models are exhausted (no point trying API at all)
+function allModelsExhausted(): boolean {
+    return MODELS_TO_TRY.every(m => isModelExhausted(m));
+}
+
+// Helper: robust generation with fallback across models
+async function generateContentWithFallback(
+    apiKey: string,
+    params: {
+        prompt: string | any[],
+        systemInstruction?: string,
+        jsonMode?: boolean,
+        modelParams?: any
+    }
+) {
+    const genAI = new GoogleGenerativeAI(apiKey);
+    let lastError;
+
+    for (const modelName of MODELS_TO_TRY) {
+        // Skip models we know are exhausted
+        if (isModelExhausted(modelName)) {
+            console.log(`⏭️ [Fallback] Skipping exhausted model: ${modelName}`);
+            continue;
+        }
+
+        try {
+            console.log(`🤖 [Fallback] Trying model: ${modelName}`);
+            const model = genAI.getGenerativeModel({
+                model: modelName,
+                systemInstruction: params.systemInstruction,
+                generationConfig: {
+                    responseMimeType: params.jsonMode ? "application/json" : "text/plain",
+                    ...params.modelParams
                 }
-            },
-            diagnosis: { type: Type.STRING, description: "Detailed feedback in Arabic. Mention if the user recited the full requested surah or stopped early." },
-            identifiedText: { type: Type.STRING, description: "The Arabic text that was recognized." }
-        },
-        required: ["surahName", "startVerse", "endVerse", "overallScore", "metrics", "mistakes", "diagnosis", "identifiedText"]
+            });
+
+            const result = await model.generateContent(params.prompt);
+            const response = await result.response;
+            console.log(`✅ [Fallback] Model ${modelName} succeeded!`);
+            return response;
+        } catch (error: any) {
+            console.warn(`⚠️ [Fallback] Model ${modelName} failed:`, error.message?.substring(0, 120));
+            lastError = error;
+
+            // 429 = This specific model's quota is exhausted. Try the NEXT model.
+            if (error.message?.includes('429') || error.message?.includes('Too Many Requests') || error.message?.includes('Quota')) {
+                // Try to parse retry delay from error message
+                const retryMatch = error.message?.match(/retry in (\d+)/i);
+                const retryAfterSec = retryMatch ? parseInt(retryMatch[1]) : 60;
+                markModelExhausted(modelName, retryAfterSec);
+                continue; // Try next model — it has its own separate quota!
+            }
+
+            // 404 = Model doesn't exist for this API key. Skip to next.
+            if (error.message?.includes('404') || error.message?.includes('not found')) {
+                continue;
+            }
+
+            // Other errors (network, 500, etc.) — also try next model
+        }
+    }
+    throw lastError || new Error("All models exhausted. Please wait and try again.");
+}
+
+// --- PROCEDURAL GENERATION ENGINE (No API Key Required) ---
+
+interface QuranVerse {
+    number: number;
+    text: string;
+    numberInSurah: number;
+    juz: number;
+}
+
+// Helper to remove Tashkeel for comparison
+const removeTashkeel = (text: string) => text.replace(/[\u064B-\u065F\u0670\u0610-\u061A\u06D6-\u06ED]/g, "");
+
+const fetchSurahVerses = async (surahNum: number, start: number, end: number): Promise<QuranVerse[]> => {
+    try {
+        // Fetch text
+        // "quran-uthmani" uses distinct Uthmani script which usually includes Basmalah at start of Verse 1 for all surahs
+        // Optimize: Use offset/limit to fetch only needed range
+        // offset is 0-indexed (Verse 1 = offset 0)
+        // limit is count of verses
+        const offset = Math.max(0, start - 1);
+        const limit = (end - start) + 1;
+
+        const textResponse = await fetch(`https://api.alquran.cloud/v1/surah/${surahNum}/quran-uthmani?offset=${offset}&limit=${limit}`);
+        if (!textResponse.ok) throw new Error("Failed to fetch Quran data");
+        const data = await textResponse.json();
+
+        const allVerses: any[] = data.data.ayahs;
+
+        // Robust Basmalah check: Check first few letters without tashkeel
+        // CRITICAL: The API uses special Unicode character ٱ (Alif Wasla) in "ٱلله"
+        const START_BASMALAH_PLAIN = "بسم ٱلله"; // Note: ٱ not regular ا
+
+        // Filter range and Clean Basmalah
+        return allVerses
+            .filter(v => v.numberInSurah >= start && v.numberInSurah <= end)
+            .map(v => {
+                let text = v.text;
+
+                // FIXED: Robust Basmalah Removal
+                // If Verse 1 of any Surah (except Fatiha #1), checks if it strictly starts with Basmalah
+                if (surahNum !== 1 && v.numberInSurah === 1) {
+                    const plain = removeTashkeel(text);
+                    // Check if it starts with the generic Bismillah pattern
+                    if (plain.startsWith(START_BASMALAH_PLAIN)) {
+                        // Basmalah is 4 words: Bismi Allahi Ar-Rahmani Ar-Rahimi
+                        const words = text.split(' ');
+                        // Ensure we don't accidentally delete the whole verse if it's super short
+                        if (words.length > 4) {
+                            text = words.slice(4).join(' ');
+                        }
+                    }
+                }
+
+                return {
+                    number: v.number,
+                    text: text.trim(), // Ensure no leading whitespace remains
+                    numberInSurah: v.numberInSurah,
+                    juz: v.juz
+                };
+            })
+            // If Verse 1 was *only* Basmalah and we stripped it, ignore it (shouldn't happen with Uthmani edition usually)
+            .filter(v => v.text.length > 0);
+
+    } catch (e) {
+        console.error("Procedural Fetch Error:", e);
+        return [];
+    }
+};
+
+const generateProceduralLevel = async (surah: string, startVerse: number, endVerse: number, mode: GameMode): Promise<LevelData> => {
+    // 1. Fetch Verses
+    const surahNum = getSurahNumber(surah);
+
+    // Safety buffer: fetch a few extra verses for distractors if range is small
+    const fetchStart = Math.max(1, startVerse - 3);
+
+    // For SURF mode, strictly limit to 30 verses per "level" to enforce pauses
+    const effectiveEndVerse = mode === 'SURF' ? Math.min(startVerse + 29, endVerse || 999) : endVerse;
+    const fetchEnd = effectiveEndVerse ? effectiveEndVerse + 5 : startVerse + 15;
+
+    const allFetched = await fetchSurahVerses(surahNum, fetchStart, fetchEnd);
+
+    if (allFetched.length === 0) {
+        throw new Error("Could not fetch verses. Please check internet connection.");
+    }
+
+    // 2. Filter down to the user's requested range for QUESTIONS
+    const activeVerses = allFetched.filter(v => v.numberInSurah >= startVerse && v.numberInSurah <= (effectiveEndVerse || 999));
+
+    const questions: any[] = [];
+
+    // --- PRE-LOOP BATCHED AI CALLS (ONE call for ALL verses instead of per-verse) ---
+    const apiKey = getApiKey();
+
+    // ASSEMBLY: Batch-fetch distractors for ALL verses in one call
+    let batchedAssemblyDistractors: Record<number, string[]> = {};
+    if (mode === 'ASSEMBLY' && apiKey && !allModelsExhausted()) {
+        try {
+            const verseList = activeVerses.map((v, i) => `${i + 1}. "${v.text}"`).join('\n');
+            const response = await generateContentWithFallback(apiKey, {
+                prompt: `Surah: ${surah}\n\nFor EACH of these ${activeVerses.length} verses, generate 4 misleading Quranic fragments (3-5 words each) that are similar but from OTHER Surahs:\n${verseList}`,
+                systemInstruction: `You are a Quran expert generating distractor fragments for a verse assembly game.\nRules:\n1. Each fragment MUST be 3-5 words of REAL, AUTHENTIC Quranic text in UTHMANI SCRIPT with FULL TASHKEEL (diacritical marks)\n2. Fragments must be CONTIGUOUS words from actual Quranic verses — NEVER hallucinate or combine words from different verses\n3. Must NOT be from the given verse's Surah\n4. Should be thematically or structurally similar to confuse the player\n5. Output JSON: { "verses": { "1": ["frag1", "frag2", "frag3", "frag4"], "2": [...] } }`,
+                jsonMode: true,
+                modelParams: { temperature: 0.9 }
+            });
+            const text = response.text();
+            const jsonStr = text.includes('```') ? text.replace(/```json/g, '').replace(/```/g, '').trim() : text;
+            const parsed = JSON.parse(jsonStr);
+            if (parsed.verses) {
+                Object.entries(parsed.verses).forEach(([key, frags]: [string, any]) => {
+                    const idx = parseInt(key) - 1;
+                    if (idx >= 0 && idx < activeVerses.length && Array.isArray(frags)) {
+                        batchedAssemblyDistractors[activeVerses[idx].numberInSurah] = frags.filter((f: any) => typeof f === 'string' && f.length > 3);
+                    }
+                });
+            }
+            console.log(`[Assembly AI Batch] Got distractors for ${Object.keys(batchedAssemblyDistractors).length} verses in 1 API call`);
+        } catch (e) {
+            console.warn('[Assembly AI Batch] Failed, will use procedural:', e);
+        }
+    }
+
+    // BRIDGE: Batch-fetch similar verses for ALL first-words in one call
+    let batchedBridgeVerses: Record<string, string[]> = {};
+    if ((mode === 'CLASSIC' || mode === 'LEARN') && apiKey && !allModelsExhausted()) {
+        const firstWordsNeeded = new Set<string>();
+        for (const verse of activeVerses) {
+            if (verse.numberInSurah < (effectiveEndVerse || 999)) {
+                const nextVerse = allFetched.find(v => v.numberInSurah === verse.numberInSurah + 1);
+                if (nextVerse) {
+                    const nw = nextVerse.text.split(' ').filter(w => w.trim().length > 0);
+                    if (nw.length >= 3) firstWordsNeeded.add(nw[0]);
+                }
+            }
+        }
+        if (firstWordsNeeded.size > 0) {
+            try {
+                const wordList = Array.from(firstWordsNeeded);
+                const response = await generateContentWithFallback(apiKey, {
+                    prompt: `For each of these ${wordList.length} Arabic words, find 3 distinct Quranic verses that START with that exact word:\n${wordList.map((w, i) => `${i + 1}. "${w}"`).join('\n')}`,
+                    systemInstruction: `You are a strict Quran expert.\nFor each numbered word, find 3 real Quranic verses starting with that word.\nOutput JSON: { "words": { "1": ["verse1", "verse2", "verse3"], "2": [...] } }\nRules: 100% accurate Uthmani script. Choose from different Surahs.`,
+                    jsonMode: true,
+                    modelParams: { temperature: 0.3 }
+                });
+                const text = response.text();
+                const jsonStr = text.includes('```') ? text.replace(/```json/g, '').replace(/```/g, '').trim() : text;
+                const parsed = JSON.parse(jsonStr);
+                if (parsed.words) {
+                    Object.entries(parsed.words).forEach(([key, verses]: [string, any]) => {
+                        const idx = parseInt(key) - 1;
+                        if (idx >= 0 && idx < wordList.length && Array.isArray(verses)) {
+                            batchedBridgeVerses[wordList[idx]] = verses.filter((v: any) => typeof v === 'string' && v.length > 5);
+                        }
+                    });
+                }
+                console.log(`[Bridge AI Batch] Got verses for ${Object.keys(batchedBridgeVerses).length} words in 1 API call`);
+            } catch (e) {
+                console.warn('[Bridge AI Batch] Failed, will use procedural:', e);
+            }
+        }
+    }
+
+    // 3. Generate Questions per Verse (NO per-verse API calls inside this loop)
+    for (const verse of activeVerses) {
+        const words = verse.text.split(' ').filter(w => w.trim().length > 0);
+        const id = `proc-${verse.numberInSurah}`;
+
+        if (mode === 'ASSEMBLY') {
+            const numFragments = Math.min(4, Math.max(3, Math.floor(words.length / 3)));
+            const fragmentSize = Math.ceil(words.length / numFragments);
+            const fragments: any[] = [];
+
+            for (let i = 0; i < numFragments; i++) {
+                const start = i * fragmentSize;
+                const end = Math.min(start + fragmentSize, words.length);
+                const fragmentWords = words.slice(start, end);
+                if (fragmentWords.length > 0) {
+                    fragments.push({ id: `c-${id}-${i}`, text: fragmentWords.join(' '), type: 'CORRECT', orderIndex: i });
+                }
+            }
+
+            // Use pre-fetched batch distractors (no API call here)
+            const distractorCount = 4;
+            const avgFragmentSize = Math.ceil(words.length / numFragments);
+            let distractorFragments: any[] = [];
+
+            const aiBatch = batchedAssemblyDistractors[verse.numberInSurah];
+            if (aiBatch && aiBatch.length >= 3) {
+                aiBatch.slice(0, distractorCount).forEach((text, idx) => {
+                    distractorFragments.push({ id: `d-${id}-ai-${idx}`, text, type: 'DISTRACTOR', orderIndex: -1 });
+                });
+                console.log(`[Assembly] Using ${distractorFragments.length} batched AI distractors for verse ${verse.numberInSurah}`);
+            }
+
+            // PROCEDURAL FALLBACK: Use REAL fragments from OTHER verses
+            // KEY: Use the SAME fragmentSize as correct fragments so all pieces look identical
+            if (distractorFragments.length < distractorCount) {
+                const needed = distractorCount - distractorFragments.length;
+
+                // Only pick verses long enough to yield a fragment of the correct size
+                const otherVerses = allFetched
+                    .filter(v => v.numberInSurah !== verse.numberInSurah)
+                    .filter(v => {
+                        const wc = v.text.split(' ').filter(w => w.trim().length > 0).length;
+                        return wc >= fragmentSize; // Must have enough words for same-size fragment
+                    })
+                    .sort(() => Math.random() - 0.5);
+
+                const candidateFragments: { text: string, sourceVerse: number }[] = [];
+
+                for (const otherVerse of otherVerses) {
+                    if (candidateFragments.length >= needed * 3) break;
+
+                    const otherWords = otherVerse.text.split(' ').filter(w => w.trim().length > 0);
+
+                    // Pick a random starting position that yields exactly fragmentSize words
+                    const maxStart = otherWords.length - fragmentSize;
+                    const fStart = Math.floor(Math.random() * (maxStart + 1));
+                    const fragText = otherWords.slice(fStart, fStart + fragmentSize).join(' ');
+
+                    // Ensure no duplication with correct fragments or other candidates
+                    const isDuplicate = fragments.some(f => f.text === fragText) ||
+                        candidateFragments.some(c => c.text === fragText);
+
+                    if (!isDuplicate && fragText.length > 3) {
+                        candidateFragments.push({ text: fragText, sourceVerse: otherVerse.numberInSurah });
+                    }
+                }
+
+                candidateFragments.slice(0, needed).forEach((candidate, idx) => {
+                    distractorFragments.push({
+                        id: `d-${id}-${idx}`,
+                        text: candidate.text,
+                        type: 'DISTRACTOR',
+                        orderIndex: -1
+                    });
+                });
+            }
+
+            fragments.push(...distractorFragments);
+
+            questions.push({
+                id,
+                type: QuestionType.VERSE_ASSEMBLY,
+                verseNumber: verse.numberInSurah,
+                points: 300,
+                prompt: "رتب أجزاء الآية الكريمة",
+                arabicText: verse.text,
+                assemblyData: { fragments: fragments.sort(() => Math.random() - 0.5) },
+                hint: "استعن بالله",
+                memorizationTip: "اقرأ الآية كاملة أولاً"
+            });
+
+        } else if (mode === 'STACK') {
+            questions.push({
+                id,
+                type: QuestionType.VERSE_STACK,
+                verseNumber: verse.numberInSurah,
+                points: 300,
+                prompt: "ابنِ الآية كلمة بكلمة",
+                arabicText: verse.text,
+                stackData: { words: words },
+                hint: "الترتيب مهم",
+            });
+
+        } else if (mode === 'SURF' || mode === 'SURVIVOR') {
+            // Smart Distractors from other verses
+            const otherWords = allFetched
+                .filter(v => v.numberInSurah !== verse.numberInSurah)
+                .map(v => v.text)
+                .join(' ')
+                .split(' ')
+                .filter(w => w.trim().length > 0);
+
+            // Shuffle and pick 3 unique distractors
+            const distractors = Array.from(new Set(otherWords))
+                .sort(() => Math.random() - 0.5)
+                .slice(0, 4);
+
+            // Fallback safe strings if not enough unique words found
+            while (distractors.length < 3) {
+                distractors.push("ٱلۡعَٰلَمِينَ");
+                distractors.push("مُّسۡتَقِيم");
+                distractors.push("حَكِيم");
+            }
+
+            questions.push({
+                id,
+                type: QuestionType.VERSE_SURFER,
+                verseNumber: verse.numberInSurah,
+                points: 300,
+                prompt: "التقط كلمات الآية الصحيحة",
+                arabicText: verse.text,
+                surferData: { words: words, distractors: distractors },
+                hint: "",
+            });
+
+        } else if (mode === 'QUIZ') {
+            // --- PROCEDURAL / MOCK LUDIC QUIZ (Fallback or Demo) ---
+            // We rotate through types to demonstrate the UI features since we might not have AI
+
+            const words = verse.text.split(' ');
+            if (words.length < 3) continue;
+
+            // --- RANDOM POOL SELECTION ---
+            // To ensure 20+ unique questions without repetition, we pick from the global TAHA_QUIZ_DATA
+            // We use a deterministic but rotating index based on the verse number to pick different questions
+            const poolIndex = (verse.numberInSurah + questions.length) % TAHA_QUIZ_DATA.length;
+            const qData = TAHA_QUIZ_DATA[poolIndex];
+
+            questions.push({
+                id: `${id}-${qData.quizSubType.toLowerCase()}`,
+                type: QuestionType.VERSE_QUIZ,
+                quizSubType: qData.quizSubType as any,
+                verseNumber: verse.numberInSurah,
+                points: qData.points,
+                prompt: qData.prompt,
+                scenario: (qData as any).scenario,
+                emojis: (qData as any).emojis,
+                arabicText: (qData as any).arabicText || qData.answer, // Fallback for various types
+                correctAnswer: qData.answer,
+                options: [...qData.options].sort(() => Math.random() - 0.5), // Shuffle options
+                explanation: qData.explanation,
+                hint: "من سورة طه"
+            });
+
+        } else {
+            // ============ VERSE BRIDGE LOGIC ============
+            // Generates data for 3-step difficulty progression:
+            // Step 1: User types first word (nextVerseFirstWord)
+            // Step 2: User chooses from 3 single words (wordDistractors)
+            // Step 3: User chooses from 3 full verses (options - all start with same word)
+
+            if (verse.numberInSurah < endVerse) {
+                const nextVerse = allFetched.find(v => v.numberInSurah === verse.numberInSurah + 1);
+
+                if (nextVerse) {
+                    const nextWords = nextVerse.text.split(' ').filter(w => w.trim().length > 0);
+                    if (nextWords.length < 3) continue; // Need at least 3 words for full verse
+
+                    const firstWord = nextWords[0];
+
+                    const fullNextVerse = nextVerse.text;
+
+                    // Authentic Quranic Verses for Common Starters (To avoid "Fake" verses)
+                    // Expanded Map to cover 80% of common sentence starters
+                    const COMMON_STARTERS: Record<string, string[]> = {
+                        "إِنَّ": ["إِنَّ ٱللَّهَ عَلَىٰ كُلِّ شَيۡءٖ قَدِيرٞ", "إِنَّ ٱللَّهَ غَفُورٞ رَّحِيمٞ", "إِنَّ ٱلَّذِينَ ءَامَنُواْ وَعَمِلُواْ ٱلصَّٰلِحَٰتِ", "إِنَّ ٱللَّهَ يُحِبُّ ٱلۡمُحۡسِنِينَ", "إِنَّ ٱلۡبَٰطِلَ كَانَ زَهُوقٗا"],
+                        "قُلۡ": ["قُلۡ هُوَ ٱللَّهُ أَحَدٌ", "قُلۡ يَٰٓأَيُّهَا ٱلۡكَٰفِرُونَ", "قُلۡ أَعُوذُ بِرَبِّ ٱلنَّاسِ", "قُلۡ سِيرُواْ فِي ٱلۡأَرۡضِ فَٱنظُرُواْ", "قُلۡ لَّن يُصِيبَنَآ إِلَّا مَا كَتَبَ ٱللَّهُ لَنَا"],
+                        "وَمَا": ["وَمَا خَلَقۡتُ ٱلۡجِنَّ وَٱلۡإِنسَ إِلَّا لِيَعۡبُدُونِ", "وَمَا تَفۡعَلُواْ مِنۡ خَيۡرٖ يَعۡلَمۡهُ ٱللَّهُ", "وَمَا ٱلۡحَيَوٰةُ ٱلدُّنۡيَآ إِلَّا مَتَٰعُ ٱلۡغُرُورِ", "وَمَا مِن دَآبَّةٖ فِي ٱلۡأَرۡضِ إِلَّا عَلَى ٱللَّهِ رِزۡقُهَا", "وَمَا كَانَ ٱللَّهُ لِيُعَذِّبَهُمۡ وَأَنتَ فِيهِمۡ"],
+                        "وَٱللَّهُ": ["وَٱللَّهُ يَعۡلَمُ وَأَنتُمۡ لَا تَعۡلَمُونَ", "وَٱللَّهُ بِمَا تَعۡمَلُونَ بَصِيرٞ", "وَٱللَّهُ عَلَىٰ كُلِّ شَيۡءٖ قَدِيرٞ", "وَٱللَّهُ يَعۡصِمُكَ مِنَ ٱلنَّاسِ", "وَٱللَّهُ يُرِيدُ أَن يَتُوبَ عَلَيۡكُمۡ"],
+                        "يَٰٓأَيُّهَا": ["يَٰٓأَيُّهَا ٱلَّذِينَ ءَامَنُواْ ٱتَّقُواْ ٱللَّهَ", "يَٰٓأَيُّهَا ٱلنَّاسُ ٱعۡبُدُواْ رَبَّكُمُ", "يَٰٓأَيُّهَا ٱلَّذِينَ ءَامَنُواْ كُتِبَ عَلَيۡكُمُ ٱلصِّيَامُ", "يَٰٓأَيُّهَا ٱلۡإِنسَٰنُ مَا غَرَّكَ بِرَبِّكَ ٱلۡكَرِيمِ", "يَٰٓأَيُّهَا ٱلنَّاسُ إِنَّ وَعۡدَ ٱللَّهِ حَقّٞ"],
+                        "أَلَمۡ": ["أَلَمۡ تَرَ كَيۡفَ فَعَلَ رَبُّكَ بِأَصۡحَٰبِ ٱلۡفِيلِ", "أَلَمۡ نَشۡرَحۡ لَكَ صَدۡرَكَ", "أَلَمۡ يَعۡلَم بِأَنَّ ٱللَّهَ يَرَىٰ", "أَلَمۡ يَأۡنِ لِلَّذِينَ ءَامَنُوٓاْ أَن تَخۡشَعَ قُلُوبُهُمۡ", "أَلَمۡ تَرَ أَنَّ ٱللَّهَ يَسۡجُدُ لَهُۥ مَن فِي ٱلسَّمَٰوَٰتِ"],
+                        "وَلَقَدۡ": ["وَلَقَدۡ يَسَّرۡنَا ٱلۡقُرۡءَانَ لِلذِّكۡرِ فَهَلۡ مِن مُّدَّكِرٖ", "وَلَقَدۡ خَلَقۡنَا ٱلۡإِنسَٰنَ وَنَعۡلَمُ مَا تُوَسۡوِسُ بِهِۦ نَفۡسُهُۥ", "وَلَقَدۡ أَرۡسَلۡنَا نُوحًا إِلَىٰ قَوۡمِهِۦ", "وَلَقَدۡ كَرَّمۡنَا بَنِيٓ ءَادَمَ", "وَلَقَدۡ ءَاتَيۡنَا لُقۡمَٰنَ ٱلۡحِكۡمَةَ"],
+                        "ٱلَّذِينَ": ["ٱلَّذِينَ يُؤۡمِنُونَ بِٱلۡغَيۡبِ وَيُقِيمُونَ ٱلصَّلَوٰةَ", "ٱلَّذِينَ ءَامَنُواْ وَعَمِلُواْ ٱلصَّٰلِحَٰتِ", "ٱلَّذِينَ هُمۡ فِي صَلَاتِهِمۡ خَٰشِعُونَ", "ٱلَّذِينَ يُنفِقُونَ أَمۡوَٰلَهُم بِٱلَّيۡلِ وَٱلنَّهَارِ"],
+                        "وَإِذَا": ["وَإِذَا قُرِئَ ٱلۡقُرۡءَانُ فَٱسۡتَمِعُواْ لَهُۥ", "وَإِذَا لَقُواْ ٱلَّذِينَ ءَامَنُواْ قَالُوٓاْ ءَامَنَّا", "وَإِذَا سَأَلَكَ عِبَادِي عَنِّي فَإِنِّي قَرِيبٌ", "وَإِذَا ٱلۡمَوۡءُۥدَةُ سُئِلَتۡ"],
+                        "فَإِن": ["فَإِن تَوَلَّوۡاْ فَقُلۡ حَسۡبِيَ ٱللَّهُ", "فَإِنَّ مَعَ ٱلۡعُسۡرِ يُسۡرًا", "فَإِنَّ ٱللَّهَ غَفُورٞ رَّحِيمٞ"],
+                        "بَلۡ": ["بَلۡ هُمۡ فِي شَكّٖ يَلۡعَبُونَ", "بَلۡ تُؤۡثِرُونَ ٱلۡحَيَوٰةَ ٱلدُّنۡيَا", "بَلۡ كَذَّبُواْ بِٱلسَّاعَةِ"],
+                        "كَلَّآ": ["كَلَّآ إِنَّ ٱلۡإِنسَٰنَ لَيَطۡغَىٰٓ", "كَلَّآ إِنَّ كِتَٰبَ ٱلۡأَبۡرَارِ لَفِي عِلِّيِّينَ", "كَلَّا سَيَعۡلَمُونَ"],
+                        "ثُمَّ": ["ثُمَّ رَدَدۡنَٰهُ أَسۡفَلَ سَافِلِينَ", "ثُمَّ لَتُسۡـَٔلُنَّ يَوۡمَئِذٍ عَنِ ٱلنَّعِيمِ", "ثُمَّ ٱلسَّبِيلَ يَسَّرَهُۥ"],
+                        "هَلۡ": ["هَلۡ أَتَىٰكَ حَدِيثُ ٱلۡغَٰشِيَةِ", "هَلۡ جَزَآءُ ٱلۡإِحۡسَٰنِ إِلَّا ٱلۡإِحۡسَٰنُ", "هَلۡ يَسۡتَوِي ٱلَّذِينَ يَعۡلَمُونَ وَٱلَّذِينَ لَا يَعۡلَمُونَ"],
+                        "وَأَنَّ": ["وَأَنَّ ٱللَّهَ لَيۡسَ بِظَلَّٰمٖ لِّلۡعَبِيدِ", "وَأَنَّ هَٰذَا صِرَٰطِي مُسۡتَقِيمٗا فَٱتَّبِعُوهُ", "وَأَنَّ ٱلۡمَسَٰجِدَ لِلَّهِ فَلَا تَدۡعُواْ مَعَ ٱللَّهِ أَحَدٗا"],
+                        "لَآ": ["لَآ أَعۡبُدُ مَا تَعۡبُدُونَ", "لَآ إِكۡرَاهَ فِي ٱلدِّينِ", "لَآ إِلَٰهَ إِلَّا هُوَ ٱلۡرَّحۡمَٰنُ ٱلۡرَّحِيمُ"],
+                        "مَا": ["مَا وَدَّعَكَ رَبُّكَ وَمَا قَلَىٰ", "مَا عِندَكُمۡ يَنفَدُ وَمَا عِندَ ٱللَّهِ بَاقٖ", "مَآ أَغْنَىٰ عَنْهُ مَالُهُۥ وَمَا كَسَبَ"],
+                        // Rare/Specific Starters (Added for robust coverage)
+                        "تَنزِيلُ": ["تَنزِيلُ ٱلۡكِتَٰبِ مِنَ ٱللَّهِ ٱلۡعَزِيزِ ٱلۡحَكِيمِ", "تَنزِيلُ ٱلۡكِتَٰبِ لَا رَيۡبَ فِيهِ مِن رَّبِّ ٱلۡعَٰلَمِينَ", "تَنزِيلٞ مِّنَ ٱلرَّحۡمَٰنِ ٱلرَّحِيمِ"], // Matches Tanzeelan/Tanzeelun
+                        "سُبۡحَٰنَ": ["سُبۡحَٰنَ ٱلَّذِيٓ أَسۡرَىٰ بِعَبۡدِهِۦ لَيۡلٗا", "سُبۡحَٰنَ ٱلَّذِي خَلَقَ ٱلۡأَزۡوَٰجَ كُلَّهَا", "سُبۡحَٰنَ رَبِّكَ رَبِّ ٱلۡعِزَّةِ عَمَّا يَصِفُونَ"],
+                        "ٱلۡحَمۡدُ": ["ٱلۡحَمۡدُ لِلَّهِ رَبِّ ٱلۡعَٰلَمِينَ", "ٱلۡحَمۡدُ لِلَّهِ ٱلَّذِي خَلَقَ ٱلسَّمَٰوَٰتِ وَٱلۡأَرۡضَ", "ٱلۡحَمۡدُ لِلَّهِ فَاطِرِ ٱلسَّمَٰوَٰتِ وَٱلۡأَرۡضِ"],
+                        "تَبَٰرَكَ": ["تَبَٰرَكَ ٱلَّذِي نَزَّلَ ٱلۡفُرۡقَانَ عَلَىٰ عَبۡدِهِۦ", "تَبَٰرَكَ ٱلَّذِي بِيَدِهِ ٱلۡمُلۡكُ", "تَبَٰرَكَ ٱلَّذِي جَعَلَ فِي ٱلسَّمَآءِ بُرُوجٗا"],
+                        "إِلَّا": ["إِلَّا تَنصُرُوهُ فَقَدۡ نَصَرَهُ ٱللَّهُ", "إِلَّا ٱلَّذِينَ ءَامَنُواْ وَعَمِلُواْ ٱلصَّٰلِحَٰتِ", "إِلَّا مَن تَوَلَّىٰ وَكَفَرَ"], // Verses starting with illa
+                        "فَلَمَّا": ["فَلَمَّا رَءَاهُ مُسۡتَقِرًّا عِندَهُۥ", "فَلَمَّا جَآءَهُمُ ٱلۡحَقُّ مِنۡ عِندِنَا", "فَلَمَّا ءَاسَفُونَا ٱنتَقَمۡنَا مِنۡهُمۡ"],
+                        "وَلَمَّا": ["وَلَمَّا دَخَلُواْ مِنۡ حَيۡثُ أَمَرَهُمۡ أَبُوهُم", "وَلَمَّا جَآءَتۡ رُسُلُنَا لُوطٗا", "وَلَمَّا بَرَزُواْ لِجَالُوتَ وَجُنُودِهِۦ"]
+                    };
+
+                    // ========== STEP 2: WORD DISTRACTORS (single words) ==========
+                    let wordDistractors: string[] = [];
+
+                    // Collect first words from other verses as word distractors
+                    const wordPool = allFetched
+                        .filter(v => v.numberInSurah !== nextVerse.numberInSurah)
+                        .map(v => {
+                            const words = v.text.split(' ').filter(w => w.trim().length > 0);
+                            return words[0];
+                        })
+                        .filter(w => w && w !== firstWord); // Not the correct word
+
+                    // Shuffle and pick 2
+                    wordDistractors = Array.from(new Set(wordPool))
+                        .sort(() => Math.random() - 0.5)
+                        .slice(0, 2);
+
+                    // Fallback single-word pool if not enough
+                    const fallbackWords = ["قَالَ", "وَمَا", "إِنَّ", "فَلَمَّا", "يَا", "وَقَالَ", "فَإِنَّ", "أَلَمْ"];
+                    while (wordDistractors.length < 2) {
+                        const candidate = fallbackWords[wordDistractors.length];
+                        if (candidate !== firstWord) {
+                            wordDistractors.push(candidate);
+                        }
+                    }
+
+                    // ========== STEP 3: FULL VERSE OPTIONS (all start with same word) ==========
+                    let verseOptions: string[] = [];
+
+                    // Use pre-fetched batch results (no API call here)
+                    const batchVerses = batchedBridgeVerses[firstWord];
+                    if (batchVerses && batchVerses.length > 0) {
+                        verseOptions = batchVerses
+                            .filter(v => v.startsWith(firstWord) && v !== fullNextVerse)
+                            .slice(0, 2);
+                        if (verseOptions.length >= 2) {
+                            console.log(`[Bridge] Using ${verseOptions.length} batched AI verses for word "${firstWord}"`);
+                        }
+                    }
+
+                    // Procedural fallback: Find verses from fetched data that start with same word
+                    if (verseOptions.length < 2) {
+                        const sameStartVerses = allFetched
+                            .filter(v => {
+                                const words = v.text.split(' ').filter(w => w.trim().length > 0);
+                                return words[0] === firstWord && v.numberInSurah !== nextVerse.numberInSurah;
+                            })
+                            .map(v => v.text)
+                            .sort(() => Math.random() - 0.5)
+                            .slice(0, 2);
+
+                        verseOptions = sameStartVerses;
+                    }
+
+                    // Final fallback: Use Common Starters if applicable, or Random UNMODIFIED Verses
+                    // Priority 1: Check if the word is a common starter
+                    const cleanFirstWord = removeTashkeel(firstWord); // Normalize for lookup if needed, but keys are usually with tashkeel if fetched that way. 
+                    // Actually, let's try direct match first.
+
+                    if (verseOptions.length < 2) {
+                        // Normalize first word for lookup (remove Tashkeel)
+                        const cleanFirstWord = removeTashkeel(firstWord);
+
+                        // Try Partial Match in Common Starters (e.g. "Wa" + "Ma" + "Allah" -> "Wama")
+                        const keys = Object.keys(COMMON_STARTERS);
+                        const matchKey = keys.find(k => removeTashkeel(k) === cleanFirstWord) ||
+                            keys.find(k => cleanFirstWord.startsWith(removeTashkeel(k)));
+
+                        if (matchKey) {
+                            const potential = COMMON_STARTERS[matchKey];
+                            for (const p of potential) {
+                                if (p !== fullNextVerse && !verseOptions.includes(p)) {
+                                    verseOptions.push(p);
+                                    if (verseOptions.length >= 2) break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Priority 2: Generic Real Verses (Authenticity > Difficulty)
+                    // If we STILL don't have enough options, we must show REAL verses. 
+                    // Showing a real verse that starts with a DIFFERENT word is better than showing a FAKE verse.
+                    // However, we try to pick verses that are "thematically confident" strings.
+
+                    if (verseOptions.length < 2) {
+                        const randomRealVerses = allFetched
+                            .filter(v => v.numberInSurah !== nextVerse.numberInSurah && v.numberInSurah !== verse.numberInSurah)
+                            .map(v => v.text)
+                            .sort(() => Math.random() - 0.5);
+
+                        for (const rv of randomRealVerses) {
+                            if (!verseOptions.includes(rv)) {
+                                verseOptions.push(rv);
+                                if (verseOptions.length >= 2) break;
+                            }
+                        }
+                    }
+
+                    // Final Safety Net: Hardcoded SAFE Full Verses (Guaranteed Authenticity)
+                    const SAFE_VERSES = [
+                        "ٱللَّهُ لَآ إِلَٰهَ إِلَّا هُوَ ٱلۡحَيُّ ٱلۡقَيُّومُ",
+                        "قُلۡ هُوَ ٱللَّهُ أَحَدٌ",
+                        "إِنَّآ أَعۡطَيۡنَٰكَ ٱلۡكَوۡثَرَ"
+                    ];
+
+                    while (verseOptions.length < 2) {
+                        const candidate = SAFE_VERSES[Math.floor(Math.random() * SAFE_VERSES.length)];
+                        if (candidate !== fullNextVerse && !verseOptions.includes(candidate)) {
+                            verseOptions.push(candidate);
+                        } else if (verseOptions.length < 2 && SAFE_VERSES.length < 5) {
+                            // duplication worst case
+                            verseOptions.push("ٱلۡحَمۡدُ لِلَّهِ رَبِّ ٱلۡعَٰلَمِينَ");
+                        }
+                    }
+
+                    // Build final options array (correct + 2 distractors)
+                    const allVerseOptions = [fullNextVerse, ...verseOptions.slice(0, 2)]
+                        .sort(() => Math.random() - 0.5);
+
+                    // Extract words from the verse for VerseSurferGame
+                    const verseWords = verse.text.split(' ').filter(w => w.trim().length > 0);
+                    // Get distractor words from wordDistractors array
+                    const distractorWords = wordDistractors.length > 0 ? wordDistractors : ["خطأ", "انتبه", "حاول", "مرة"];
+
+                    questions.push({
+                        id,
+                        type: QuestionType.VERSE_BRIDGE,
+                        verseNumber: verse.numberInSurah,
+                        points: 300,
+                        prompt: "أكمل بداية الآية التالية",
+                        arabicText: verse.text,
+                        nextVerseFirstWord: firstWord,
+                        wordDistractors: wordDistractors, // NEW: For Step 2
+                        correctAnswer: fullNextVerse, // Full verse for Step 3
+                        options: allVerseOptions, // NEW: All start with same word
+                        hint: "لاحظ سياق الآيات",
+                        surferData: { // NEW: For VerseSurferGame
+                            words: verseWords,
+                            distractors: distractorWords
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+
+    return {
+        surahName: surah,
+        questions: questions.length > 0 ? questions : []
     };
+};
+
+// --- Utils ---
+async function retry<T>(fn: () => Promise<T>, retries = 2, delay = 1000): Promise<T> {
+    try {
+        return await fn();
+    } catch (error) {
+        if (retries <= 0) throw error;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return retry(fn, retries - 1, delay * 2);
+    }
+}
+
+
+// --- Main Service Functions ---
+
+export const analyzeRecitation = async (input: { text?: string, audioBase64?: string, targetSurah?: string, range?: { start: number, end?: number } }): Promise<DiagnosticResult> => {
+    const apiKey = getApiKey();
+
+    // Fallback result for demo/error cases
+    const fallbackResult = (reason: string): DiagnosticResult => ({
+        surahName: input.targetSurah || "Demo",
+        startVerse: input.range?.start || 1,
+        endVerse: input.range?.end || 5,
+        overallScore: 75,
+        metrics: { memorization: 75, tajweed: 70, pronunciation: 80 },
+        mistakes: [{
+            type: 'MEMORIZATION',
+            verse: input.range?.start || 1,
+            text: "مثال",
+            correction: "مثال صحيح",
+            description: "This is a demo/fallback result",
+            advice: reason
+        }],
+        diagnosis: `عرض تجريبي - ${reason}`,
+        identifiedText: input.text || "(Audio analysis unavailable)"
+    });
+
+    if (!apiKey) {
+        return fallbackResult("No API Key provided. Add key in Settings for real analysis.");
+    }
 
     try {
         const parts: any[] = [];
-        
-        let contextPrompt = "";
-        if (input.targetSurah) {
-            contextPrompt = `
-            TARGET CONTEXT: The user is attempting to recite Surah "${input.targetSurah}".
-            
-            STRICT HIFZ EXAMINATION RULES:
-            1. **CONTINUITY CHECK (IMPORTANT)**: You must detect if the user skips any part of the text.
-               - Did they skip a verse in the middle? (e.g., recites Verse 1, then Verse 3).
-               - Did they skip a phrase inside a verse?
-               - Did they stop early?
-            2. **REPORTING GAPS**: If ANY text is missing from the target Surah sequence:
-               - Create a 'MEMORIZATION' mistake.
-               - In 'description', explicitly state: "Skipped verse X" or "Missed phrase [...]".
-               - In 'correction', provide the missing text.
-               - Significantly lower the 'memorization' score.
-            3. **Transcribe**: First transcribe what was heard, then compare it to the Uthmani text of ${input.targetSurah}.
-            `;
-        } else {
-            contextPrompt = `Identify the Surah and verses recited. Check for standard memorization and tajweed errors.`;
-        }
-
         if (input.audioBase64) {
+            const cleanBase64 = input.audioBase64.includes(',')
+                ? input.audioBase64.split(',')[1]
+                : input.audioBase64;
+
             parts.push({
-                inlineData: { mimeType: "audio/webm", data: input.audioBase64 }
+                inlineData: {
+                    mimeType: "audio/webm",
+                    data: cleanBase64
+                }
             });
-            parts.push({ text: `Analyze this Quran recitation. ${contextPrompt} Provide a detailed breakdown of scores, metrics, and specific mistakes with actionable advice for each.` });
-        } else if (input.text) {
-            parts.push({ text: `Analyze this written Quranic text: "${input.text}". ${contextPrompt} Provide detailed metrics and check for spelling/memorization errors.` });
         }
 
-        // Fixed: Using gemini-3-pro-preview for complex recitation analysis task
-        const response = await ai.models.generateContent({
-            model: 'gemini-3-pro-preview',
-            contents: { parts },
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: schema,
-                systemInstruction: "You are a strict Quran Hafiz Examiner (Sheikh). Your primary goal is to detect MEMORIZATION GAPS (omissions) and Tajweed errors. If the user skips words or verses, you MUST report them as specific mistakes. Respond in Arabic JSON.",
-            }
+        const jsonSchema = `
+        4. المخرجات يجب أن تكون JSON فقط:
+        {
+          "overallScore": number,
+          "metrics": {"memorization": number, "tajweed": number, "pronunciation": number},
+          "mistakes": [{"type": "MEMORIZATION|TAJWEED|PRONUNCIATION", "verse": number, "text": "الكلمة الخطأ", "correction": "الصواب", "description": "وصف دقيق للخطأ بالعربية", "advice": "نصيحة عملية"}],
+          "diagnosis": "تقرير شامل وملخص للمستوى العام (بالعربية)",
+          "identifiedText": "النص الذي تم تحليله"
+        }`;
+
+        const promptText = input.audioBase64
+            ? `استمع إلى تلاوة سورة ${input.targetSurah || "غير محددة"}.
+               1. اكتب النص الذي تسمعه بدقة (identifiedText).
+               2. قيم التلاوة من 100 في: الحفظ، التجويد، والنطق.
+               3. استخرج الأخطاء:
+                  - الحفظ: نسيان، تبديل.
+                  - التجويد: الغنة، المدود، القلقلة.
+                  - المخارج: تفخيم، ترقيق.
+               ${jsonSchema}`
+            : `قم بتحليل النص القرآني المكتوب التالي من سورة ${input.targetSurah || "غير محددة"}:
+               "${input.text}"
+               
+               المهمة:
+               1. قارن النص المكتوب بالنص القرآني الصحيح (مصحف المدينة).
+               2. استخرج الأخطاء الإملائية (رسم المصحف) أو التشكيلية أو النقص/الزيادة.
+               3. قيم الحفظ بناءً على دقة الكتابة.
+               ${jsonSchema}`;
+
+        parts.push(promptText);
+
+        const response = await generateContentWithFallback(apiKey, {
+            prompt: parts,
+            systemInstruction: "أنت شيخ مقرئ خبير في علم التجويد والمقامات. مهمتك هي الاستماع للتلاوة وتصحيحها بدقة متناهية مع التركيز على أحكام التجويد (النون الساكنة والتنوين، المدود، التفخيم والترقيق) ومخارج الحروف. كل مخرجاتك يجب أن تكون باللغة العربية الفصحى.",
+            jsonMode: true
         });
+        const text = response.text();
+        console.log("[ANALYSIS] Raw response:", text.substring(0, 500));
 
-        const text = response.text;
-        if (!text) throw new Error("No response");
-        return JSON.parse(text) as DiagnosticResult;
+        const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        const data = JSON.parse(jsonStr);
 
-    } catch (error) {
-        console.error("Diagnosis failed", error);
         return {
-             surahName: input.targetSurah || "البقرة",
-             startVerse: 1,
-             endVerse: 5,
-             overallScore: 0,
-             metrics: { memorization: 0, tajweed: 0, pronunciation: 0 },
-             mistakes: [],
-             diagnosis: "تعذر تحليل الإدخال. يرجى المحاولة مرة أخرى.",
-             identifiedText: ""
+            surahName: input.targetSurah || "Unknown",
+            startVerse: input.range?.start || 1,
+            endVerse: input.range?.end,
+            overallScore: data.overallScore || 0,
+            metrics: data.metrics || { memorization: 0, tajweed: 0, pronunciation: 0 },
+            mistakes: data.mistakes || [],
+            diagnosis: data.diagnosis || "تعذر التحليل الدقيق",
+            identifiedText: data.identifiedText || ""
         };
+
+    } catch (e: any) {
+        // Detailed error logging
+        const errorMessage = e?.message || String(e);
+        console.error("[ANALYSIS] API call failed:", errorMessage);
+        console.error("[ANALYSIS] Using fallback demo result");
+
+        // Detect specific errors
+        const is404 = errorMessage.includes('404') || errorMessage.includes('not found');
+        const isRateLimit = errorMessage.includes('429') || errorMessage.includes('Too Many Requests');
+
+        let reason = "API call failed.";
+        if (is404) {
+            reason = "Model not available for your API key. Using demo result.";
+        } else if (isRateLimit) {
+            reason = "Rate limit exceeded. Wait 1 minute and try again.";
+        }
+
+        return fallbackResult(reason);
     }
 };
 
-export const checkRecitationGaps = async (audioBase64: string, maskedVerseText: string): Promise<{filledWords: {word: string, isCorrect: boolean}[]}> => {
-    if (!process.env.API_KEY) {
-        // Mock response for offline testing
-        return {
-            filledWords: [{ word: "Test", isCorrect: true }]
-        };
+export const checkRecitationGaps = async (audioBase64: string, maskedVerseText: string): Promise<{ filledWords: { word: string, isCorrect: boolean }[], fullTranscript: string }> => {
+    const apiKey = getApiKey();
+    if (!apiKey) {
+        throw new Error("API Key missing");
     }
 
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    
-    // Fixed: Using plain object for responseSchema as per guidelines
-    const schema = {
-        type: Type.OBJECT,
-        properties: {
-            filledWords: {
-                type: Type.ARRAY,
-                items: {
-                    type: Type.OBJECT,
-                    properties: {
-                        word: { type: Type.STRING, description: "The word spoken by the user for the blank." },
-                        isCorrect: { type: Type.BOOLEAN, description: "True ONLY if the spoken word matches the Quranic text for that position." }
-                    },
-                    required: ["word", "isCorrect"]
-                }
-            }
-        },
-        required: ["filledWords"]
-    };
+    console.log("[GAPS] Starting checkRecitationGaps");
+    console.log("[GAPS] Audio length:", audioBase64.length);
+    console.log("[GAPS] Masked text:", maskedVerseText);
+    console.log("[GAPS] ✅ Using Gemini AI for audio transcription");
 
     try {
-        const parts = [
-            { inlineData: { mimeType: "audio/webm", data: audioBase64 } },
-            { text: `
-                You are a strict Quran Recitation Examiner.
-                
-                I will provide a verse text where some words are hidden with the placeholder "[MASK]".
-                The user has recited the verse.
-                
-                INPUT TEXT: "${maskedVerseText}"
-                
-                YOUR TASK:
-                1. Listen to the audio corresponding to the "[MASK]" positions.
-                2. Transcribe EXACTLY what the user said for each mask.
-                3. Compare it to the original Quranic word for that position.
-                
-                OUTPUT RULES:
-                - Return an array of objects, one for each [MASK] in order.
-                - If the user said the correct word, return { word: "TheWord", isCorrect: true }.
-                - If the user said a WRONG word, return { word: "WhatTheySaid", isCorrect: false }.
-                - If the user skipped the word or was silent, return { word: "", isCorrect: false }.
-                - DO NOT hallucinate correct words if the user made a mistake. Be strict.
-             ` }
-        ];
-
-        // Fixed: Using gemini-3-pro-preview for complex gap analysis
-        const response = await ai.models.generateContent({
-            model: 'gemini-3-pro-preview',
-            contents: { parts },
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: schema
-            }
+        const response = await generateContentWithFallback(apiKey, {
+            prompt: [
+                {
+                    inlineData: {
+                        mimeType: "audio/webm",
+                        data: audioBase64
+                    }
+                },
+                `Verse Text with Gaps: "${maskedVerseText}"\nTranscribe and fill the gaps based on the audio.`
+            ],
+            systemInstruction: `You are a Quran Recitation Verifier.
+        TASK: Listen to the audio and:
+        1. Transcribe EVERYTHING you hear (fullTranscript).
+        2. Fill in the [MASK] gaps in the provided text.
+        INPUT: Audio + "Bismi Allahi [MASK] [MASK]"
+        OUTPUT: JSON only.
+        Schema: { 
+            "fullTranscript": "بسم الله الرحمن الرحيم",
+            "filledWords": [{ "word": "الرحمن", "isCorrect": true }, { "word": "الرحيم", "isCorrect": true }] 
+        }
+        Strictly use Arabic text in fullTranscript.`,
+            jsonMode: true
         });
 
-        const text = response.text;
-        if (!text) throw new Error("No response");
-        return JSON.parse(text);
+        const text = response.text();
+        console.log("[GAPS] Response received:", text.substring(0, 200));
 
+        const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(jsonStr);
+        console.log("[GAPS] Successfully parsed:", parsed);
+        return {
+            filledWords: parsed.filledWords || [],
+            fullTranscript: parsed.fullTranscript || ""
+        };
     } catch (e) {
-        console.error("Gap check failed", e);
-        return { filledWords: [] };
+        console.error("[GAPS] API or parse error:", e);
+        return { filledWords: [], fullTranscript: "" };
     }
 };
 
+// --- REQUEST DEDUPLICATION & CACHING ---
+// Prevents duplicate API calls from React StrictMode double-mounts,
+// fast navigation, or any other source of duplicate requests.
+const pendingRequests: Map<string, Promise<LevelData>> = new Map();
+const responseCache: Map<string, { data: LevelData, timestamp: number }> = new Map();
+const CACHE_TTL = 30_000; // 30 seconds
+
 export const generateLevel = async (
-    surah: string, 
-    startVerse: number = 1, 
-    mode: GameMode = 'CLASSIC'
+    surah: string,
+    startVerse: number = 1,
+    mode: GameMode = 'CLASSIC',
+    endVerse?: number
 ): Promise<LevelData> => {
-  if (!process.env.API_KEY) {
-    console.warn("No API Key found. Using fallback data.");
-    return new Promise(resolve => setTimeout(() => resolve(FALLBACK_LEVEL), 1000));
-  }
+    const cacheKey = `${surah}-${startVerse}-${endVerse}-${mode}`;
 
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  const batchSize = (mode === 'SURF' || mode === 'STACK' || mode === 'SURVIVOR') ? 8 : (mode === 'LEARN' || mode === 'QUIZ' ? 5 : 3); 
+    // 1. Return cached response if still fresh
+    const cached = responseCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+        console.log(`[GENERATE LEVEL] ♻️ Returning cached result for ${cacheKey}`);
+        return cached.data;
+    }
 
-  try {
-    const generate = async () => {
-        let systemInstruction = "";
-        let prompt = "";
-        let schema: any;
+    // 2. If an identical request is already in flight, reuse it
+    const pending = pendingRequests.get(cacheKey);
+    if (pending) {
+        console.log(`[GENERATE LEVEL] ⏳ Dedup: reusing in-flight request for ${cacheKey}`);
+        return pending;
+    }
 
-        if (mode === 'LEARN') {
-             systemInstruction = "You are a Quran teacher. Provide the exact Arabic text for the requested verses to help the student memorize.";
-             prompt = `Fetch verses ${startVerse} to ${startVerse + batchSize - 1} of Surah "${surah}".
-                 OUTPUT LANGUAGE: ARABIC.
-                 Game Logic: Provide the full Arabic text for each verse strictly.
-                 `;
-             
-             schema = {
-                 type: Type.OBJECT,
-                 properties: {
-                     surahName: { type: Type.STRING },
-                     questions: {
-                         type: Type.ARRAY,
-                         items: {
-                             type: Type.OBJECT,
-                             properties: {
-                                 id: { type: Type.STRING },
-                                 verseNumber: { type: Type.INTEGER },
-                                 arabicText: { type: Type.STRING, description: "Full complete arabic text of the verse" },
-                                 memorizationTip: { type: Type.STRING, description: "A short tip for memorizing this specific verse" }
-                             },
-                             required: ["id", "verseNumber", "arabicText", "memorizationTip"]
-                         }
-                     }
-                 },
-                 required: ["surahName", "questions"]
-             };
-        } else if (mode === 'QUIZ') {
-            systemInstruction = `
-                You are a Senior Islamic Scholar specializing in Quranic Sciences, specifically Tafseer and Vocabulary.
-                Your task is to create a high-quality educational quiz based on a specific Surah.
-                
-                STRICT SOURCE CONSTRAINT:
-                - All interpretations (Tafseer) and Vocabulary definitions MUST be derived ONLY from "Tafseer Al-Sa'di" (تفسير السعدي) or "Al-Tafseer Al-Muyassar" (التفسير الميسر).
-                - Do NOT invent interpretations. Do NOT use AI hallucinations.
-                
-                QUESTION DIVERSITY & PLAUSIBILITY:
-                - You must generate a mix of question types (Vocabulary, Tafseer, Themes, Precision).
-                - DISTRACTORS (Wrong Answers) MUST BE PLAUSIBLE:
-                   - Do not use obvious wrong answers.
-                   - Use words that share a root, or concepts that are common misconceptions.
-                   - Use Mutashabihat (similar sounding words/verses) for precision questions.
-            `;
-            
-            prompt = `Create a 5-question deep learning quiz for Surah "${surah}", verses ${startVerse} to ${startVerse + batchSize}.
-                OUTPUT LANGUAGE: ARABIC.
-
-                Generate exactly 5 questions with diverse types:
-                1. VOCABULARY: Ask about the meaning of a specific word (Ghareeb al-Quran).
-                   - Distractors: Other linguistic meanings or common confusions.
-                2. TAFSEER: Ask about the general meaning or implication of a verse.
-                   - Distractors: Literal interpretations or meanings of similar verses.
-                3. THEME: Ask about the central message or lesson (Hidayat).
-                4. PRECISION: Ask to fill in a specific word where synonyms might be confused (Mutashabihat).
-                
-                Ensure 'explanation' cites the source (e.g., "قال السعدي...").
-                `;
-            
-            schema = {
-                type: Type.OBJECT,
-                properties: {
-                    surahName: { type: Type.STRING },
-                    questions: {
-                        type: Type.ARRAY,
-                        items: {
-                            type: Type.OBJECT,
-                            properties: {
-                                id: { type: Type.STRING },
-                                verseNumber: { type: Type.INTEGER },
-                                quizSubType: { type: Type.STRING, enum: ['VOCABULARY', 'TAFSEER', 'THEME', 'PRECISION'], description: "Category of the question" },
-                                arabicText: { type: Type.STRING, description: "The Verse Text related to the question" },
-                                prompt: { type: Type.STRING, description: "The specific question text" },
-                                correctAnswer: { type: Type.STRING, description: "The correct option from Tafseer" },
-                                options: { type: Type.ARRAY, items: { type: Type.STRING }, description: "4 options total. Wrong answers must be PLAUSIBLE and tricky." },
-                                explanation: { type: Type.STRING, description: "Detailed explanation from Tafseer Al-Sa'di." }
-                            },
-                            required: ["id", "verseNumber", "quizSubType", "arabicText", "prompt", "correctAnswer", "options", "explanation"]
-                        }
-                    }
-                },
-                required: ["surahName", "questions"]
-            };
-
-        } else if (mode === 'STACK') {
-             systemInstruction = "You are an expert Quran teacher designing a tower building game.";
-             prompt = `Create a 'Quran Stack' game level for Surah "${surah}".
-                 Target: Verses ${startVerse} to ${startVerse + batchSize - 1} (${batchSize} verses total).
-                 OUTPUT LANGUAGE: ARABIC.
-                 
-                 Game Logic:
-                 - Provide the words of these verses in exact sequential order.
-                 `;
-             
-             schema = {
-                 type: Type.OBJECT,
-                 properties: {
-                     surahName: { type: Type.STRING },
-                     questions: {
-                         type: Type.ARRAY,
-                         items: {
-                             type: Type.OBJECT,
-                             properties: {
-                                 id: { type: Type.STRING },
-                                 verseNumber: { type: Type.INTEGER },
-                                 arabicText: { type: Type.STRING, description: "Full text" },
-                                 stackData: {
-                                     type: Type.OBJECT,
-                                     properties: {
-                                         words: { type: Type.ARRAY, items: { type: Type.STRING } }
-                                     },
-                                     required: ["words"]
-                                 }
-                             },
-                             required: ["id", "verseNumber", "arabicText", "stackData"]
-                         }
-                     }
-                 },
-                 required: ["surahName", "questions"]
-             };
-
-        } else if (mode === 'SURF' || mode === 'SURVIVOR') {
-            systemInstruction = "You are an expert Quran teacher designing a rapid-response game.";
-            prompt = `Create a '${mode === 'SURF' ? 'Verse Surfer' : 'Hifz Survivor'}' game level for Surah "${surah}".
-                Target: Verses ${startVerse} to ${startVerse + batchSize - 1} (${batchSize} verses total).
-                OUTPUT LANGUAGE: ARABIC.
-                
-                Game Logic:
-                - Provide the sequential words for these verses in strict order.
-                - Provide a pool of 'distractor' words (Mutashabihat/similar words).
-                `;
-            
-            schema = {
-                type: Type.OBJECT,
-                properties: {
-                    surahName: { type: Type.STRING },
-                    questions: {
-                        type: Type.ARRAY,
-                        items: {
-                            type: Type.OBJECT,
-                            properties: {
-                                id: { type: Type.STRING },
-                                verseNumber: { type: Type.INTEGER },
-                                arabicText: { type: Type.STRING, description: "Full text of verses" },
-                                surferData: {
-                                    type: Type.OBJECT,
-                                    properties: {
-                                        words: { type: Type.ARRAY, items: { type: Type.STRING } },
-                                        distractors: { type: Type.ARRAY, items: { type: Type.STRING } }
-                                    },
-                                    required: ["words", "distractors"]
-                                }
-                            },
-                            required: ["id", "verseNumber", "arabicText", "surferData"]
-                        }
-                    }
-                },
-                required: ["surahName", "questions"]
-            };
-
-        } else if (mode === 'ASSEMBLY') {
-            systemInstruction = "You are an expert Quran teacher specializing in Mutashabihat (similar verses). You create challenging puzzles.";
-            
-            prompt = `Create a 'Verse Assembler' game level for Surah "${surah}".
-                Generate 3 questions starting from Verse #${startVerse}.
-                OUTPUT LANGUAGE: ARABIC.
-                
-                Game Logic:
-                - Analyze the length of verses starting at ${startVerse}.
-                - If verses are short (e.g., < 10 words), combine 2 sequential verses into a single puzzle.
-                - If verses are long, use a single verse per puzzle.
-                - Split the correct text into 4-6 logic fragments (phrases).
-
-                CRITICAL - DISTRACTORS:
-                - Generate 3-4 'Distractor' fragments.
-                - These MUST be REAL, EXISTING Quranic text from *other* Surahs or verses that are "Mutashabihat" (highly similar and easily confused) with the target verse.
-                - Do NOT invent fake Arabic. Use actual similar verses.
-                `;
-            
-            schema = {
-                type: Type.OBJECT,
-                properties: {
-                  surahName: { type: Type.STRING },
-                  questions: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        id: { type: Type.STRING },
-                        verseNumber: { type: Type.INTEGER, description: "Starting verse number for this block" },
-                        arabicText: { type: Type.STRING, description: "Full text of the Verse(s) being assembled." },
-                        fragments: {
-                           type: Type.ARRAY,
-                           items: {
-                               type: Type.OBJECT,
-                               properties: {
-                                   text: { type: Type.STRING },
-                                   type: { type: Type.STRING, enum: ['CORRECT', 'DISTRACTOR'] },
-                                   orderIndex: { type: Type.INTEGER, description: "Sequential order (0, 1, 2...) for CORRECT items. -1 for DISTRACTOR." }
-                               },
-                               required: ["text", "type", "orderIndex"]
-                           }
-                        },
-                        hint: { type: Type.STRING },
-                        memorizationTip: { type: Type.STRING }
-                      },
-                      required: ["id", "verseNumber", "arabicText", "fragments", "hint", "memorizationTip"]
-                    }
-                  }
-                },
-                required: ["surahName", "questions"]
-            };
-        } else {
-            systemInstruction = "You are an expert Quran teacher. Focus on connecting verses (Robt).";
-            prompt = `Create a 'Verse Bridge' game level for Surah "${surah}".
-                Generate 3 sequential questions starting from Verse #${startVerse}.
-                OUTPUT LANGUAGE: ARABIC.
-                
-                For each Question:
-                1. 'arabicText': The text of Verse N.
-                2. 'nextVerseFirstWord': The first word of Verse N+1.
-                3. 'options': 3 options for the start of Verse N+1 (1 correct, 2 distractors).
-                4. 'wordDistractors': 2 extra distractor words for typing hints.
-                `;
-
-            schema = {
-                type: Type.OBJECT,
-                properties: {
-                  surahName: { type: Type.STRING },
-                  questions: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        id: { type: Type.STRING },
-                        verseNumber: { type: Type.INTEGER },
-                        arabicText: { type: Type.STRING, description: "Text of Verse N (The Anchor)." },
-                        nextVerseFirstWord: { type: Type.STRING, description: "First word of Verse N+1." },
-                        correctAnswer: { type: Type.STRING, description: "The full first phrase of Verse N+1." },
-                        options: { type: Type.ARRAY, items: { type: Type.STRING }, description: "3 options for start of Verse N+1." },
-                        wordDistractors: { type: Type.ARRAY, items: { type: Type.STRING } },
-                        hint: { type: Type.STRING },
-                        memorizationTip: { type: Type.STRING }
-                      },
-                      required: ["id", "verseNumber", "arabicText", "nextVerseFirstWord", "correctAnswer", "options", "hint"]
-                    }
-                  }
-                },
-                required: ["surahName", "questions"]
-            };
+    // 3. Create and track the new request
+    const requestPromise = (async () => {
+        try {
+            const result = await _generateLevelImpl(surah, startVerse, mode, endVerse);
+            // Cache the result
+            responseCache.set(cacheKey, { data: result, timestamp: Date.now() });
+            return result;
+        } finally {
+            pendingRequests.delete(cacheKey);
         }
+    })();
 
-        // Fixed: Using gemini-3-pro-preview for complex level generation task
-        const response = await ai.models.generateContent({
-            model: 'gemini-3-pro-preview',
-            contents: prompt,
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: schema,
-              systemInstruction: systemInstruction,
-            }
-          });
-          return response;
-    };
-
-    const response = await retry(generate);
-    const text = response.text;
-    if (!text) throw new Error("No response text");
-    
-    const data = JSON.parse(text);
-
-    const processedQuestions = data.questions.map((q: any) => {
-      let qType = QuestionType.VERSE_BRIDGE;
-      if (mode === 'ASSEMBLY') qType = QuestionType.VERSE_ASSEMBLY;
-      if (mode === 'SURF') qType = QuestionType.VERSE_SURFER;
-      if (mode === 'STACK') qType = QuestionType.VERSE_STACK;
-      if (mode === 'SURVIVOR') qType = QuestionType.VERSE_SURVIVOR;
-      if (mode === 'LEARN') qType = QuestionType.VERSE_LEARN;
-      if (mode === 'QUIZ') qType = QuestionType.VERSE_QUIZ;
-
-      let processedQ: any = {
-          id: q.id || `q-${Math.random()}`,
-          prompt: q.prompt || (mode === 'ASSEMBLY' ? `رتب الآيات` : (mode === 'SURF' ? 'التقط الكلمات بالترتيب' : (mode === 'LEARN' ? 'احفظ الآيات' : (mode === 'QUIZ' ? 'اختبار المعاني' : `ما هي بداية الآية التالية؟`)))),
-          verseNumber: q.verseNumber || startVerse,
-          arabicText: q.arabicText,
-          hint: q.hint,
-          memorizationTip: q.memorizationTip,
-          explanation: q.explanation,
-          quizSubType: q.quizSubType, // Pass subType
-          points: 300,
-          type: qType
-      };
-
-      if (mode === 'ASSEMBLY') {
-          const fragments = q.fragments.map((f: any, idx: number) => ({
-              ...f,
-              id: `frag-${q.id}-${idx}-${Math.random().toString(36).substr(2, 9)}`
-          }));
-          processedQ.assemblyData = { fragments };
-      } else if (mode === 'SURF' || mode === 'SURVIVOR') {
-          processedQ.surferData = q.surferData;
-      } else if (mode === 'STACK') {
-          processedQ.stackData = q.stackData;
-      } else if (mode === 'LEARN') {
-          // No extra data
-      } else {
-          processedQ.nextVerseFirstWord = q.nextVerseFirstWord;
-          processedQ.correctAnswer = q.correctAnswer; 
-          processedQ.options = q.options;
-          processedQ.wordDistractors = q.wordDistractors;
-      }
-
-      return processedQ;
-    });
-
-    return {
-      surahName: data.surahName || surah,
-      questions: processedQuestions
-    };
-
-  } catch (error) {
-    console.error("Gemini generation failed", error);
-    return FALLBACK_LEVEL;
-  }
+    pendingRequests.set(cacheKey, requestPromise);
+    return requestPromise;
 };
+
+// Actual implementation (called only once per unique request)
+const _generateLevelImpl = async (
+    surah: string,
+    startVerse: number,
+    mode: GameMode,
+    endVerse?: number
+): Promise<LevelData> => {
+    const apiKey = getApiKey();
+
+    // HYBRID SWITCH
+    if (!apiKey) {
+        console.log(`[GENERATE LEVEL] No API key - using procedural generation for ${mode} mode`);
+        // Ensure endVerse is set
+        const finalEnd = endVerse || (startVerse + 4);
+        return await generateProceduralLevel(surah, startVerse, finalEnd, mode);
+    }
+
+    console.log(`[GENERATE LEVEL] ✅ Using Gemini AI for ${mode} mode`);
+
+    // --- LUDIC QUIZ MODE ---
+    if (mode === 'QUIZ') {
+        try {
+            const response = await generateContentWithFallback(apiKey, {
+                prompt: `Generate 5 structured quiz questions for Surah ${surah} (Verses ${startVerse}-${endVerse || startVerse + 10}).
+Output Schema:
+{
+    "questions": [
+        {
+            "type": "VERSE_QUIZ",
+            "quizSubType": "SCENARIO" | "PUZZLE" | "CONNECTION" | "ORDER" | "TAFSEER",
+            "prompt": "The question text (Arabic) - DO NOT include the answer verse here!",
+            "scenario": "REQUIRED for SCENARIO: A relatable real-life situation (Arabic)",
+            "emojis": "REQUIRED for PUZZLE: 3-5 emojis matching specific words",
+            "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
+            "correctAnswer": "Exact string of correct option",
+            "explanation": "Why this is correct (Arabic)",
+            "verseNumber": number,
+            "arabicText": "Verse text"
+        }
+    ]
+}`,
+                systemInstruction: `You are an Expert Game Designer for a Quran App.
+            Your goal is to generate FUN, LUDIC, and CHALLENGING questions that connect the Quran to DAILY LIFE.
+            
+            ### CRITICAL RULES:
+            1. ⛔ **NEVER** include the answer verse in the question prompt. The player must GUESS the verse based on the scenario/clue.
+            2. 🌍 **SCENARIOS (Mawqif)**: Create relatable real-world situations where a specific verse applies.
+               - ❌ Bad: "Which verse mentions patience?"
+               - ✅ Good: "You are stuck in heavy traffic and feel your anger rising. Which verse reminds you that Allah is with the patient?"
+            3. 🧩 **PUZZLES**: Use Emojis or Word Associations.
+               - ✅ Good: "🔥 ➡️ 👠 ➡️ 🐍" (Answer: The story of Musa at the fire)
+            4. 🔗 **CONNECTIONS**: Find the "Odd One Out" or "Missing Link".
+            5. **LANGUAGE**: ALL Output (Questions, Options, Explanations) MUST be in **ARABIC (Fusha)**.
+            6. **DISTRACTORS**: Must be plausible Quranic text or related concepts. No random/silly words.
+            `,
+                jsonMode: true
+            });
+
+            const text = response.text();
+            const jsonStr = text.includes("```") ? text.replace(/```json/g, "").replace(/```/g, "").trim() : text;
+            const data = JSON.parse(jsonStr);
+
+            return {
+                surahName: surah,
+                questions: data.questions.map((q: any, idx: number) => ({
+                    ...q,
+                    id: `game-quiz-${Date.now()}-${idx}`,
+                    points: 500,
+                    type: QuestionType.VERSE_QUIZ
+                }))
+            };
+        } catch (e) {
+            console.error("Quiz Gen Error:", e);
+            return await generateProceduralLevel(surah, startVerse, endVerse || startVerse + 5, mode);
+        }
+    }
+
+    // --- ALL OTHER MODES (Assembly/Bridge/Stack/Surf/Survivor/Learn) ---
+    // Use generateProceduralLevel which:
+    // 1. Fetches real verses from the Quran API
+    // 2. Makes batched AI calls for enrichment (distractors, bridge verses)
+    // 3. Produces the CORRECT data structures (assemblyData, surferData, stackData)
+    //    that game components expect
+    const finalEnd = endVerse || (startVerse + 4);
+    console.log(`[GENERATE LEVEL] Using procedural+AI hybrid for ${mode} mode (verses ${startVerse}-${finalEnd})`);
+    return await generateProceduralLevel(surah, startVerse, finalEnd, mode);
+};
+
+function getQuestionType(mode: GameMode): QuestionType {
+    switch (mode) {
+        case 'ASSEMBLY': return QuestionType.VERSE_ASSEMBLY;
+        case 'STACK': return QuestionType.VERSE_STACK;
+        case 'SURF': return QuestionType.VERSE_SURFER;
+        case 'SURVIVOR': return QuestionType.VERSE_SURVIVOR;
+        case 'LEARN': return QuestionType.VERSE_LEARN;
+        case 'QUIZ': return QuestionType.VERSE_QUIZ;
+        default: return QuestionType.VERSE_BRIDGE;
+    }
+}
