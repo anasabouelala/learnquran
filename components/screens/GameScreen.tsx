@@ -471,6 +471,7 @@ export const GameScreen: React.FC<Props> = ({ surahName, initialVerse = 1, endVe
         question={currentQuestion}
         surahName={surahName}
         onGameEnd={(victory) => handleAnswer(victory)}
+        onExit={handleGameExit}
       />
     );
   }

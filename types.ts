@@ -154,5 +154,11 @@ export interface UserProfile {
   xp: number;
   streak: number;
   badges: string[];
-  // Add other fields as needed
+  accuracy: number;
+  currentSurah?: {
+    name: string;
+    progress: number;
+  };
+  totalGamesPlayed: number;
+  isAdmin?: boolean;
 }

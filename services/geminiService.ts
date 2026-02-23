@@ -4,17 +4,17 @@ import { LevelData, QuestionType, DiagnosticResult, GameMode } from "../types";
 import { TAHA_QUIZ_DATA } from "../components/data/surahTahaQuestions";
 
 // --- Configuration ---
+// import { GoogleGenerativeAI } from "@google/generative-ai";
+
 const getApiKey = (): string | undefined => {
-    const envKey = import.meta.env.VITE_API_KEY;
-    const localKey = localStorage.getItem('GEMINI_API_KEY');
+    // In production (Vercel), we don't expose the key to the client.
+    // We return 'SERVER_MANAGED' to signal that we should use the proxy.
+    if (!import.meta.env.DEV) {
+        return 'SERVER_MANAGED';
+    }
 
-    const key = envKey || localKey || undefined;
-
-    // Debug logging
-    console.log("[API KEY] Source:", envKey ? "ENV" : (localKey ? "localStorage" : "NONE"));
-    console.log("[API KEY] Key (masked):", key ? key.substring(0, 10) + "..." : "undefined");
-
-    return key;
+    // In development, we use the local env key for direct access (faster iteration)
+    return import.meta.env.VITE_GEMINI_API_KEY;
 };
 
 // --- DATA: Surah Mapping for Public API ---
@@ -85,7 +85,8 @@ async function generateContentWithFallback(
         modelParams?: any
     }
 ) {
-    const genAI = new GoogleGenerativeAI(apiKey);
+    const isServerManaged = apiKey === 'SERVER_MANAGED';
+
     let lastError;
 
     for (const modelName of MODELS_TO_TRY) {
@@ -96,20 +97,55 @@ async function generateContentWithFallback(
         }
 
         try {
-            console.log(`🤖 [Fallback] Trying model: ${modelName}`);
-            const model = genAI.getGenerativeModel({
-                model: modelName,
-                systemInstruction: params.systemInstruction,
-                generationConfig: {
-                    responseMimeType: params.jsonMode ? "application/json" : "text/plain",
-                    ...params.modelParams
-                }
-            });
+            console.log(`🤖 [Fallback] Trying model: ${modelName} (${isServerManaged ? 'PROXY' : 'DIRECT'})`);
 
-            const result = await model.generateContent(params.prompt);
-            const response = await result.response;
+            let text = "";
+
+            if (isServerManaged) {
+                // Use Vercel Serverless Function
+                const response = await fetch('/api/gemini', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        modelName,
+                        prompt: params.prompt,
+                        systemInstruction: params.systemInstruction,
+                        jsonMode: params.jsonMode,
+                        modelParams: params.modelParams
+                    })
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(errorData.error || `Server Error: ${response.status}`);
+                }
+
+                const data = await response.json();
+                text = data.text;
+            } else {
+                // Direct Client-Side Call (Dev Mode Only)
+                const genAI = new GoogleGenerativeAI(apiKey);
+                const model = genAI.getGenerativeModel({
+                    model: modelName,
+                    systemInstruction: params.systemInstruction,
+                    generationConfig: {
+                        responseMimeType: params.jsonMode ? "application/json" : "text/plain",
+                        ...params.modelParams
+                    }
+                });
+
+                const result = await model.generateContent(params.prompt);
+                const response = await result.response;
+                text = response.text();
+            }
+
             console.log(`✅ [Fallback] Model ${modelName} succeeded!`);
-            return response;
+            // Return a mock response object compatible with existing code
+            return {
+                text: () => text,
+                response: Promise.resolve({ text: () => text })
+            };
+
         } catch (error: any) {
             console.warn(`⚠️ [Fallback] Model ${modelName} failed:`, error.message?.substring(0, 120));
             lastError = error;

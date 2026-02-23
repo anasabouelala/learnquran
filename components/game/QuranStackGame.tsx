@@ -8,6 +8,7 @@ interface Props {
   surahName: string;
   question: Question;
   onGameEnd: (victory: boolean) => void;
+  onExit?: () => void;
 }
 
 interface StackBlock {
@@ -45,7 +46,7 @@ const COLORS = [
   'bg-orange-500',
 ];
 
-export const QuranStackGame: React.FC<Props> = ({ surahName, question, onGameEnd }) => {
+export const QuranStackGame: React.FC<Props> = ({ surahName, question, onGameEnd, onExit }) => {
   const [gameState, setGameState] = useState<'START' | 'PLAYING' | 'GAME_OVER' | 'VICTORY'>('START');
   const [score, setScore] = useState(0);
   const [combo, setCombo] = useState(0);
@@ -257,8 +258,8 @@ export const QuranStackGame: React.FC<Props> = ({ surahName, question, onGameEnd
     if (isPerfect) {
       setCombo(c => c + 1);
       showFeedback(combo > 0 ? `مثالي! x${combo + 1}` : 'مثالي!', 'text-yellow-400');
-      finalWidth = prevBlock.width;
-      finalLeft = prevBlock.left;
+      finalWidth = prevBlock ? prevBlock.width : finalWidth;
+      finalLeft = prevBlock ? prevBlock.left : finalLeft;
     } else {
       setCombo(0);
 
@@ -334,6 +335,23 @@ export const QuranStackGame: React.FC<Props> = ({ surahName, question, onGameEnd
       onPointerDown={handleTap}
     >
       <div className="absolute inset-0 bg-gradient-to-b from-slate-800 to-slate-900" />
+
+      {/* Close Button */}
+      {onExit && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onExit();
+          }}
+          className="absolute top-4 right-4 z-[60] flex items-center justify-center w-10 h-10 rounded-full bg-slate-800/80 backdrop-blur-md border border-white/10 hover:bg-red-500/20 hover:border-red-500/50 transition-all duration-300 shadow-lg hover:shadow-red-500/20 pointer-events-auto cursor-pointer group"
+          title="Exit Game"
+        >
+          <span className="sr-only">Exit</span>
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-slate-400 group-hover:text-red-400 transition-colors">
+            <path d="M18 6 6 18" /><path d="m6 6 12 12" />
+          </svg>
+        </button>
+      )}
 
       {/* HUD */}
       <div className="absolute top-0 left-0 w-full p-4 z-40 flex justify-between items-start pointer-events-none">

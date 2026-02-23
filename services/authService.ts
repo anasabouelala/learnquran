@@ -1,90 +1,189 @@
-import { supabase, isSupabaseConfigured } from './supabaseClient';
+
+import { supabase } from './supabaseClient';
 import { UserProfile } from '../types';
 
+// ─── Hardcoded admins — always have full access ──────────────────────────────
+// Add your email(s) here. These bypass the database is_admin flag entirely.
+const ADMIN_EMAILS = new Set([
+    'anasabouelala@gmail.com', // owner — full access forever
+]);
+
 export const authService = {
-    isConfigured: () => isSupabaseConfigured(),
+    async getCurrentUser(): Promise<UserProfile | null> {
+        try {
+            const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+            if (sessionError || !session?.user) return null;
 
-    signUp: async (email: string, password: string, name: string) => {
-        if (!supabase) throw new Error("Supabase not configured");
+            const { data: profile, error } = await supabase
+                .from('profiles')
+                .select('*')
+                .eq('auth_user_id', session.user.id)
+                .single();
 
+            if (error || !profile) {
+                const email = session.user.email || '';
+                return {
+                    name: session.user.user_metadata.full_name || email.split('@')[0] || 'User',
+                    email,
+                    level: 1,
+                    xp: 0,
+                    streak: 0,
+                    badges: [],
+                    accuracy: 0,
+                    totalGamesPlayed: 0,
+                    isAdmin: ADMIN_EMAILS.has(email)
+                };
+            }
+
+            // Fetch additional stats:
+            // 1. Current Surah Progress (Most recently updated)
+            const { data: recentProgress } = await supabase
+                .from('user_surah_progress')
+                .select('surah_name, mastery_level')
+                .eq('user_id', profile.id)
+                .order('updated_at', { ascending: false })
+                .limit(1)
+                .single();
+
+            // 2. Total Games Played (Sum of games_played across all surahs)
+            // Or count of rows if we track per-game. Here using aggregated per-surah.
+            const { data: totalGames } = await supabase
+                .from('user_surah_progress')
+                .select('games_played');
+
+            const gamesCount = totalGames?.reduce((acc, curr) => acc + (curr.games_played || 0), 0) || 0;
+
+            // 3. Average Accuracy (Mastery Level)
+            const { data: allProgress } = await supabase
+                .from('user_surah_progress')
+                .select('mastery_level');
+
+            const avgAccuracy = allProgress && allProgress.length > 0
+                ? allProgress.reduce((acc, curr) => acc + (curr.mastery_level || 0), 0) / allProgress.length
+                : 0;
+
+            const profileEmail = profile.email || session.user.email || '';
+            const premiumActive = profile.is_premium === true &&
+                (profile.premium_expires_at == null ||
+                    new Date(profile.premium_expires_at) > new Date());
+            return {
+                name: profile.full_name || session.user.user_metadata.full_name || 'User',
+                email: profileEmail,
+                level: profile.level || 1,
+                xp: profile.xp || 0,
+                streak: profile.streak || 0,
+                badges: profile.badges || [],
+                accuracy: Math.round(avgAccuracy),
+                totalGamesPlayed: gamesCount,
+                isAdmin: ADMIN_EMAILS.has(profileEmail) || profile.is_admin === true || premiumActive,
+                currentSurah: recentProgress ? {
+                    name: recentProgress.surah_name,
+                    progress: Math.round(recentProgress.mastery_level || 0)
+                } : undefined
+            };
+        } catch (error: any) {
+            if (error.name === 'AbortError' || error.message?.includes('aborted')) {
+                console.log('Ignored abort error in getCurrentUser');
+            } else {
+                console.error('Failed to get current user:', error);
+            }
+            return null;
+        }
+    },
+
+    async signIn(email: string, password: string) {
+        const { data, error } = await supabase.auth.signInWithPassword({
+            email,
+            password
+        });
+        if (error) throw error;
+        return data.user;
+    },
+
+    async signUp(email: string, password: string, name: string) {
         const { data, error } = await supabase.auth.signUp({
             email,
             password,
             options: {
                 data: {
-                    full_name: name,
-                    avatar_url: '',
-                },
-            },
+                    full_name: name
+                }
+            }
         });
+        if (error) throw error;
 
+        // Setup initial profile
+        if (data.user) {
+            const { error: profileError } = await supabase
+                .from('profiles')
+                .insert([
+                    {
+                        auth_user_id: data.user.id,
+                        email: email,
+                        full_name: name,
+                        level: 1,
+                        xp: 0,
+                        streak: 0
+                    }
+                ]);
+            if (profileError) console.error('Error creating profile:', profileError);
+        }
+
+        return data.user;
+    },
+
+    async signInWithGoogle() {
+        const { data, error } = await supabase.auth.signInWithOAuth({
+            provider: 'google',
+            options: {
+                redirectTo: `${window.location.origin}/auth/callback`
+            }
+        });
         if (error) throw error;
         return data;
     },
 
-    signIn: async (email: string, password: string) => {
-        if (!supabase) throw new Error("Supabase not configured");
-
-        const { data, error } = await supabase.auth.signInWithPassword({
-            email,
-            password,
-        });
-
-        if (error) throw error;
-        return data;
-    },
-
-    signOut: async () => {
-        if (!supabase) return;
+    async signOut() {
         const { error } = await supabase.auth.signOut();
         if (error) throw error;
     },
 
-    getCurrentUser: async (): Promise<UserProfile | null> => {
-        if (!supabase) return null;
+    /** Verify a Gumroad license key and activate premium on the logged-in user */
+    async activateLicense(licenseKey: string): Promise<{ success: boolean; premium_expires_at?: string; error?: string }> {
+        try {
+            const { data: { session } } = await supabase.auth.getSession();
+            if (!session) return { success: false, error: 'Not authenticated' };
 
-        const { data: { session }, error } = await supabase.auth.getSession();
-        if (error || !session) return null;
+            const res = await supabase.functions.invoke('verify-license', {
+                body: { license_key: licenseKey },
+            });
 
-        const { user } = session;
-
-        // Fetch additional profile data if needed, or construct from metadata
-        // For simplicity, we assume metadata has everything we need initially, 
-        // but typically you'd fetch from a 'profiles' table.
-
-        // Check if we have a local profile sync
-        // In a real app, you'd fetch from 'profiles' table here.
-        // For now, we return a basic profile structure that matches UserProfile interface
-
-        return {
-            name: user.user_metadata.full_name || emailToName(user.email || ''),
-            email: user.email || '',
-            level: user.user_metadata.level || 1,
-            xp: user.user_metadata.xp || 0,
-            streak: user.user_metadata.streak || 0,
-            badges: user.user_metadata.badges || []
-        };
+            if (res.error) return { success: false, error: res.error.message };
+            return res.data as { success: boolean; premium_expires_at: string };
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
     },
 
-    onAuthStateChange: (callback: (user: UserProfile | null) => void) => {
-        if (!supabase) return { data: { subscription: { unsubscribe: () => { } } } };
-
+    onAuthStateChange(callback: (user: UserProfile | null) => void) {
         return supabase.auth.onAuthStateChange(async (_event, session) => {
             if (session?.user) {
-                const user = session.user;
-                callback({
-                    name: user.user_metadata.full_name || emailToName(user.email || ''),
-                    email: user.email || '',
-                    level: user.user_metadata.level || 1,
-                    xp: user.user_metadata.xp || 0,
-                    streak: user.user_metadata.streak || 0,
-                    badges: user.user_metadata.badges || []
-                });
+                try {
+                    // Fetch full profile again
+                    const user = await this.getCurrentUser();
+                    callback(user);
+                } catch (error: any) {
+                    if (error.name === 'AbortError' || error.message?.includes('aborted')) {
+                        console.log('Ignored abort error during auth state change');
+                    } else {
+                        console.error('Error fetching user on auth change:', error);
+                    }
+                    // We might not want to callback(null) here because the user IS logged in, 
+                    // we just failed to fetch the profile.
+                }
             } else {
                 callback(null);
             }
         });
     }
 };
-
-const emailToName = (email: string) => email.split('@')[0];

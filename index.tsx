@@ -22,18 +22,18 @@ class ErrorBoundary extends Component<Props, State> {
   }
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error("Hifz Quest Critical Error:", error, errorInfo);
+    console.error("hafed.app Critical Error:", error, errorInfo);
   }
 
   public render() {
     if (this.state.hasError) {
       return (
-        <div style={{ 
-          padding: '40px', 
-          color: 'white', 
-          backgroundColor: '#0f172a', 
-          minHeight: '100vh', 
-          direction: 'ltr', 
+        <div style={{
+          padding: '40px',
+          color: 'white',
+          backgroundColor: '#0f172a',
+          minHeight: '100vh',
+          direction: 'ltr',
           fontFamily: 'sans-serif',
           display: 'flex',
           flexDirection: 'column',
@@ -42,25 +42,25 @@ class ErrorBoundary extends Component<Props, State> {
         }}>
           <h1 style={{ color: '#ef4444' }}>Runtime Error</h1>
           <p>The application could not start correctly.</p>
-          <pre style={{ 
-            color: '#fca5a5', 
-            backgroundColor: '#1e293b', 
-            padding: '20px', 
-            borderRadius: '12px', 
+          <pre style={{
+            color: '#fca5a5',
+            backgroundColor: '#1e293b',
+            padding: '20px',
+            borderRadius: '12px',
             fontSize: '12px',
             marginTop: '20px'
           }}>
             {this.state.error?.message}
           </pre>
-          <button 
-            onClick={() => window.location.reload()} 
-            style={{ 
-              marginTop: '30px', 
-              padding: '12px 24px', 
-              backgroundColor: '#06b6d4', 
-              border: 'none', 
-              borderRadius: '8px', 
-              color: 'white', 
+          <button
+            onClick={() => window.location.reload()}
+            style={{
+              marginTop: '30px',
+              padding: '12px 24px',
+              backgroundColor: '#06b6d4',
+              border: 'none',
+              borderRadius: '8px',
+              color: 'white',
               fontWeight: 'bold',
               cursor: 'pointer'
             }}
