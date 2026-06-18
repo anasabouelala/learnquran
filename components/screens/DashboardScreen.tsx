@@ -3,7 +3,7 @@ import { GlobalStats, SurahStats } from '../../types';
 import { getGlobalStats, getSurahStats, addGoal, removeGoal } from '../../services/storageService';
 import { ArcadeButton } from '../ui/ArcadeButton';
 import { authService } from '../../services/authService';
-import { ArrowLeft, Activity, Flame, Medal, Scroll, Crown, Sparkles, Quote, Target, Plus, Calendar, Trash2, Star } from 'lucide-react';
+import { ArrowLeft, Activity, Flame, Medal, Scroll, Crown, Sparkles, Quote, Target, Plus, Calendar, Trash2, Star, CheckCircle2, Ban } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 
@@ -11,6 +11,8 @@ interface Props {
     onBack: () => void;
     onLogout: () => void;
     isPremium: boolean;
+    userEmail?: string;
+    userName?: string;
 }
 
 const QURAN_SURAHS = [
@@ -28,10 +30,35 @@ const QURAN_SURAHS = [
     "المسد", "الإخلاص", "الفلق", "الناس"
 ];
 
-export const DashboardScreen: React.FC<Props> = ({ onBack, isPremium, onLogout }) => {
+export const DashboardScreen: React.FC<Props> = ({ onBack, isPremium, onLogout, userEmail, userName }) => {
     const [global, setGlobal] = useState<GlobalStats | null>(null);
     const [surahs, setSurahs] = useState<SurahStats[]>([]);
     const [showGoalModal, setShowGoalModal] = useState(false);
+
+    // Subscription cancellation (recurring billing lives on Gumroad; we send the
+    // request to support, who cancels it in the Gumroad dashboard).
+    const [showCancelModal, setShowCancelModal] = useState(false);
+    const [cancelReason, setCancelReason] = useState("");
+    const [cancelRequested, setCancelRequested] = useState(false);
+    const SUPPORT_EMAIL = 'abouelala93@gmail.com';
+
+    const handleCancelRequest = () => {
+        const subject = encodeURIComponent('طلب إلغاء الاشتراك - Hafed App');
+        const body = encodeURIComponent(
+            `السلام عليكم،\n\nأرغب في إلغاء اشتراكي المتميز وإيقاف التجديد التلقائي على Gumroad.\n\n` +
+            `الاسم: ${userName || '—'}\n` +
+            `البريد الإلكتروني: ${userEmail || '—'}\n` +
+            (cancelReason.trim() ? `السبب: ${cancelReason.trim()}\n` : '') +
+            `\nيرجى إلغاء الاشتراك المتكرر من لوحة تحكم Gumroad وتأكيد ذلك. شكراً لكم.`
+        );
+        window.open(`mailto:${SUPPORT_EMAIL}?subject=${subject}&body=${body}`, '_blank');
+        setCancelRequested(true);
+    };
+
+    const closeCancelModal = () => {
+        setShowCancelModal(false);
+        setTimeout(() => { setCancelRequested(false); setCancelReason(""); }, 300);
+    };
 
     // Goal Modal State
     const [newGoalSurah, setNewGoalSurah] = useState("");
@@ -306,6 +333,30 @@ export const DashboardScreen: React.FC<Props> = ({ onBack, isPremium, onLogout }
                         </p>
                     </motion.div>
 
+                    {/* 5. SUBSCRIPTION MANAGEMENT */}
+                    {isPremium && (
+                        <motion.div
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            transition={{ delay: 0.55 }}
+                            className="bg-slate-800/80 border border-slate-700 p-5 rounded-[2rem]"
+                        >
+                            <div className="flex items-center gap-2 mb-2">
+                                <Crown size={16} className="text-amber-400" />
+                                <h3 className="font-arcade text-white text-sm">إدارة الاشتراك</h3>
+                            </div>
+                            <p className="text-slate-400 text-xs leading-relaxed mb-4 font-arabic">
+                                اشتراكك المتميز يُدار عبر Gumroad. لإيقاف التجديد التلقائي وعدم تحصيل أي رسوم مستقبلية، أرسل طلب الإلغاء وسنوقفه خلال ٢٤ ساعة.
+                            </p>
+                            <button
+                                onClick={() => setShowCancelModal(true)}
+                                className="w-full bg-red-500/10 hover:bg-red-500/20 text-red-400 py-2.5 rounded-xl border border-red-500/20 hover:border-red-500/50 transition-all font-bold text-sm flex items-center justify-center gap-2 active:scale-95"
+                            >
+                                <Ban size={16} /> إلغاء الاشتراك
+                            </button>
+                        </motion.div>
+                    )}
+
                 </div>
 
                 {/* --- RIGHT COL: GOALS & SURAH LIST --- */}
@@ -531,6 +582,70 @@ export const DashboardScreen: React.FC<Props> = ({ onBack, isPremium, onLogout }
                                     </button>
                                 </div>
                             </div>
+                        </motion.div>
+                    </div>
+                )}
+            </AnimatePresence>
+
+            {/* --- CANCEL SUBSCRIPTION MODAL --- */}
+            <AnimatePresence>
+                {showCancelModal && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                        <motion.div
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm"
+                            onClick={closeCancelModal}
+                        ></motion.div>
+
+                        <motion.div
+                            initial={{ scale: 0.9, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.9, opacity: 0 }}
+                            className="bg-slate-800 border-2 border-red-500/40 rounded-3xl p-6 w-full max-w-md relative z-10 shadow-2xl"
+                        >
+                            {!cancelRequested ? (
+                                <>
+                                    <h2 className="text-2xl font-arcade text-white text-center mb-3">إلغاء الاشتراك</h2>
+                                    <p className="text-slate-300 text-sm text-center mb-5 leading-relaxed font-arabic">
+                                        سنوقف التجديد التلقائي على Gumroad خلال ٢٤ ساعة فلن تُحصّل أي رسوم جديدة. تبقى ميزات الاشتراك فعّالة حتى نهاية فترتك الحالية.
+                                    </p>
+                                    <textarea
+                                        value={cancelReason}
+                                        onChange={(e) => setCancelReason(e.target.value)}
+                                        placeholder="سبب الإلغاء (اختياري)..."
+                                        className="w-full bg-slate-900 border border-slate-600 rounded-xl p-3 text-white text-sm font-arabic focus:border-red-500 outline-none resize-none h-20 mb-4"
+                                    />
+                                    <div className="flex gap-3">
+                                        <button
+                                            onClick={handleCancelRequest}
+                                            className="flex-1 bg-red-600 hover:bg-red-500 text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all active:scale-95"
+                                        >
+                                            <Ban size={18} /> تأكيد الإلغاء
+                                        </button>
+                                        <button
+                                            onClick={closeCancelModal}
+                                            className="bg-slate-700 text-slate-300 px-6 py-3 rounded-xl font-bold hover:bg-slate-600 transition-colors"
+                                        >
+                                            تراجع
+                                        </button>
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="text-center">
+                                    <CheckCircle2 className="w-14 h-14 text-emerald-400 mx-auto mb-4" />
+                                    <h2 className="text-2xl font-arcade text-white mb-3">تم إرسال طلبك</h2>
+                                    <p className="text-slate-300 text-sm leading-relaxed font-arabic mb-2">
+                                        سنلغي اشتراكك على Gumroad ونرسل تأكيداً عبر البريد قريباً.
+                                    </p>
+                                    <p className="text-slate-500 text-xs leading-relaxed font-arabic mb-6">
+                                        لم يفتح برنامج البريد؟ راسلنا مباشرة على
+                                        <span className="text-arcade-cyan" dir="ltr"> {SUPPORT_EMAIL}</span>
+                                    </p>
+                                    <ArcadeButton onClick={closeCancelModal} size="lg">تم</ArcadeButton>
+                                </div>
+                            )}
                         </motion.div>
                     </div>
                 )}

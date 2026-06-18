@@ -1,5 +1,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Gamepad2 } from 'lucide-react';
 import { MainMenu } from './components/screens/MainMenu';
 import { GameScreen } from './components/screens/GameScreen';
 import { DiagnosticScreen } from './components/screens/DiagnosticScreen';
@@ -287,13 +289,74 @@ const App: React.FC = () => {
     setGameConfig({});
   }, []);
 
-  // ─── Loading Spinner ──────────────────────────────────────────────────────
+  // ─── Loading Screen ───────────────────────────────────────────────────────
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center text-white" dir="ltr">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mb-4" />
-        <p className="font-mono text-sm">Loading...</p>
-        <p className="text-xs text-slate-500 mt-2">{loadingStatus}</p>
+      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center text-white overflow-hidden relative" dir="ltr">
+        {/* soft animated background glow */}
+        <motion.div
+          aria-hidden
+          className="absolute w-[480px] h-[480px] rounded-full bg-cyan-500/10 blur-3xl"
+          animate={{ scale: [1, 1.25, 1], opacity: [0.4, 0.7, 0.4] }}
+          transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut' }}
+        />
+
+        <div className="relative flex items-center justify-center mb-8">
+          {/* rotating orbital ring */}
+          <motion.div
+            className="absolute w-28 h-28 rounded-full border-2 border-transparent border-t-cyan-400 border-r-blue-500"
+            animate={{ rotate: 360 }}
+            transition={{ duration: 1.1, repeat: Infinity, ease: 'linear' }}
+          />
+          {/* counter-rotating inner ring */}
+          <motion.div
+            className="absolute w-20 h-20 rounded-full border-2 border-transparent border-b-indigo-400/70"
+            animate={{ rotate: -360 }}
+            transition={{ duration: 1.6, repeat: Infinity, ease: 'linear' }}
+          />
+          {/* breathing logo core */}
+          <motion.div
+            className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-cyan-400 to-blue-600 flex items-center justify-center shadow-[0_0_30px_rgba(6,182,212,0.5)]"
+            animate={{ scale: [1, 1.08, 1] }}
+            transition={{ duration: 1.6, repeat: Infinity, ease: 'easeInOut' }}
+          >
+            <Gamepad2 size={30} className="text-white" />
+          </motion.div>
+        </div>
+
+        <motion.p
+          className="font-extrabold text-lg tracking-tight"
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.15 }}
+        >
+          hafed<span className="text-cyan-400">.app</span>
+        </motion.p>
+
+        {/* bouncing dots */}
+        <div className="flex items-center gap-1.5 mt-3">
+          {[0, 1, 2].map((i) => (
+            <motion.span
+              key={i}
+              className="w-2 h-2 rounded-full bg-cyan-400"
+              animate={{ y: [0, -6, 0], opacity: [0.4, 1, 0.4] }}
+              transition={{ duration: 0.9, repeat: Infinity, ease: 'easeInOut', delay: i * 0.15 }}
+            />
+          ))}
+        </div>
+
+        <AnimatePresence mode="wait">
+          <motion.p
+            key={loadingStatus}
+            className="text-xs text-slate-500 mt-4 h-4"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.2 }}
+          >
+            {loadingStatus}
+          </motion.p>
+        </AnimatePresence>
       </div>
     );
   }
@@ -339,41 +402,52 @@ const App: React.FC = () => {
           onClose={() => setShowLicenseModal(false)}
         />
       )}
-      {appState === GameState.MENU && (
-        <MainMenu
-          user={user}
-          startInAuth={activationIntent}
-          onStartGame={handleStartGame}
-          onStartDiagnostic={handleStartDiagnostic}
-          onOpenDashboard={handleOpenDashboard}
-          initialState={menuInitialState}
-          onLogout={handleLogout}
-        />
-      )}
-      {appState === GameState.DASHBOARD && (
-        <DashboardScreen onBack={() => setAppState(GameState.MENU)} isPremium={isPremium} onLogout={handleLogout} />
-      )}
+      {/* ─── Animated screen transitions ─────────────────────────────────── */}
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={appState}
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -10 }}
+          transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+        >
+          {appState === GameState.MENU && (
+            <MainMenu
+              user={user}
+              startInAuth={activationIntent}
+              onStartGame={handleStartGame}
+              onStartDiagnostic={handleStartDiagnostic}
+              onOpenDashboard={handleOpenDashboard}
+              initialState={menuInitialState}
+              onLogout={handleLogout}
+            />
+          )}
+          {appState === GameState.DASHBOARD && (
+            <DashboardScreen onBack={() => setAppState(GameState.MENU)} isPremium={isPremium} onLogout={handleLogout} userEmail={user?.email} userName={user?.name} />
+          )}
 
-      {appState === GameState.DIAGNOSTIC && (
-        <DiagnosticScreen
-          targetSurah={selectedSurah}
-          startVerse={verseRange.start}
-          endVerse={verseRange.end}
-          onDiagnosticComplete={handleDiagnosticComplete}
-          onBack={handleExit}
-        />
-      )}
+          {appState === GameState.DIAGNOSTIC && (
+            <DiagnosticScreen
+              targetSurah={selectedSurah}
+              startVerse={verseRange.start}
+              endVerse={verseRange.end}
+              onDiagnosticComplete={handleDiagnosticComplete}
+              onBack={handleExit}
+            />
+          )}
 
-      {appState === GameState.PLAYING && (
-        <GameScreen
-          surahName={selectedSurah}
-          initialVerse={verseRange.start}
-          endVerse={verseRange.end}
-          gameMode={selectedGameMode}
-          config={gameConfig}
-          onExit={handleExit}
-        />
-      )}
+          {appState === GameState.PLAYING && (
+            <GameScreen
+              surahName={selectedSurah}
+              initialVerse={verseRange.start}
+              endVerse={verseRange.end}
+              gameMode={selectedGameMode}
+              config={gameConfig}
+              onExit={handleExit}
+            />
+          )}
+        </motion.div>
+      </AnimatePresence>
 
       {/* Premium Welcome Popup */}
       <PremiumWelcomeModal
