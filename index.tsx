@@ -2,6 +2,33 @@ import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Global safety net for background promise rejections we don't own.
+// Supabase / GoTrue (assets/supabase-*.js) auto-refreshes the auth token and
+// coordinates tabs via the Web Locks API on its own timers — work that no app
+// code awaits. A network blip or a stale/cleared token (e.g. after our manual
+// localStorage signout cleanup) makes those reject with nothing to catch them,
+// surfacing to users as "Unhandled Promise Rejection ... assets/supabase-*.js".
+// They are non-fatal: auth recovers on the next tick or user action. We log and
+// suppress that specific noise; anything we don't recognise is left untouched so
+// genuine bugs still surface (and still hit the ErrorBoundary / console).
+// ─────────────────────────────────────────────────────────────────────────────
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event.reason as { name?: string; message?: string } | undefined;
+  const text = `${reason?.name ?? ''} ${reason?.message ?? reason ?? ''}`.toLowerCase();
+
+  const isBenignAuthNoise =
+    /auth(retryablefetch|api|sessionmissing)error/.test(text) ||
+    /failed to fetch|networkerror|load failed|fetch aborted|aborterror/.test(text) ||
+    /navigator\.?locks?|lock.*(acquire|timeout)|acquire.*timeout/.test(text) ||
+    /refresh.*token|token.*refresh/.test(text);
+
+  if (isBenignAuthNoise) {
+    console.warn('[hafed] Suppressed benign background rejection:', reason?.name || reason?.message || reason);
+    event.preventDefault(); // stop it being reported as an Unhandled Promise Rejection
+  }
+});
+
 interface Props {
   children?: ReactNode;
 }
