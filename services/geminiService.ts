@@ -384,75 +384,66 @@ const generateProceduralLevel = async (surah: string, startVerse: number, endVer
         const id = `proc-${verse.numberInSurah}`;
 
         if (mode === 'ASSEMBLY') {
-            const numFragments = Math.min(4, Math.max(3, Math.floor(words.length / 3)));
-            const fragmentSize = Math.ceil(words.length / numFragments);
-            const fragments: any[] = [];
+            // Need >= 3 words for a meaningful "arrange the pieces" puzzle. Skip very
+            // short verses so we never render a trivial single-slot board.
+            if (words.length < 3) continue;
 
-            for (let i = 0; i < numFragments; i++) {
-                const start = i * fragmentSize;
-                const end = Math.min(start + fragmentSize, words.length);
-                const fragmentWords = words.slice(start, end);
-                if (fragmentWords.length > 0) {
-                    fragments.push({ id: `c-${id}-${i}`, text: fragmentWords.join(' '), type: 'CORRECT', orderIndex: i });
+            // Split into 2-4 balanced, contiguous, NON-empty fragments. Even
+            // distribution guarantees exactly this many slots — the old ceil() math
+            // left trailing empty slices, which could collapse to a single slot.
+            const numFragments = Math.min(4, Math.max(2, Math.round(words.length / 3)));
+            const fragments: any[] = [];
+            {
+                const base = Math.floor(words.length / numFragments);
+                let rem = words.length % numFragments;
+                let pos = 0;
+                for (let i = 0; i < numFragments; i++) {
+                    const take = base + (rem > 0 ? 1 : 0);
+                    if (rem > 0) rem--;
+                    const chunk = words.slice(pos, pos + take);
+                    pos += take;
+                    if (chunk.length > 0) fragments.push({ id: `c-${id}-${fragments.length}`, text: chunk.join(' '), type: 'CORRECT', orderIndex: fragments.length });
                 }
             }
+            if (fragments.length < 2) continue; // never a single-slot assembly
+            const fragmentSize = Math.max(1, Math.round(words.length / fragments.length));
 
-            // Use pre-fetched batch distractors (no API call here)
+            // Anti-echo guard: a distractor must NEVER reproduce the answer — not the
+            // whole verse, not any correct piece, not a sub-span of the verse — and no
+            // two distractors may repeat. Compared tashkeel-insensitively. This is what
+            // fixes "same choice shown once split and once whole".
+            const norm = (s: string) => removeTashkeel(s).replace(/\s+/g, ' ').trim();
+            const fullNorm = norm(verse.text);
+            const forbidden = new Set<string>([fullNorm, ...fragments.map(f => norm(f.text))]);
+            const seen = new Set<string>();
+            const distractorFragments: any[] = [];
             const distractorCount = 4;
-            const avgFragmentSize = Math.ceil(words.length / numFragments);
-            let distractorFragments: any[] = [];
+            const tryAdd = (text: any, idSuffix: string) => {
+                if (typeof text !== 'string') return;
+                const n = norm(text);
+                if (n.length < 4 || forbidden.has(n) || seen.has(n)) return;
+                if (fullNorm.includes(n) || n.includes(fullNorm)) return; // belongs to THIS verse
+                seen.add(n);
+                distractorFragments.push({ id: `d-${id}-${idSuffix}`, text: text.trim(), type: 'DISTRACTOR', orderIndex: -1 });
+            };
 
-            const aiBatch = batchedAssemblyDistractors[verse.numberInSurah];
-            if (aiBatch && aiBatch.length >= 3) {
-                aiBatch.slice(0, distractorCount).forEach((text, idx) => {
-                    distractorFragments.push({ id: `d-${id}-ai-${idx}`, text, type: 'DISTRACTOR', orderIndex: -1 });
-                });
-                console.log(`[Assembly] Using ${distractorFragments.length} batched AI distractors for verse ${verse.numberInSurah}`);
-            }
+            // 1) AI distractors first — credible 3-5 word fragments from OTHER surahs.
+            const aiBatch = batchedAssemblyDistractors[verse.numberInSurah] || [];
+            for (let i = 0; i < aiBatch.length && distractorFragments.length < distractorCount; i++) tryAdd(aiBatch[i], `ai-${i}`);
 
-            // PROCEDURAL FALLBACK: Use REAL fragments from OTHER verses
-            // KEY: Use the SAME fragmentSize as correct fragments so all pieces look identical
+            // 2) Procedural fallback — real, same-size fragments from OTHER fetched verses.
             if (distractorFragments.length < distractorCount) {
-                const needed = distractorCount - distractorFragments.length;
-
-                // Only pick verses long enough to yield a fragment of the correct size
                 const otherVerses = allFetched
                     .filter(v => v.numberInSurah !== verse.numberInSurah)
-                    .filter(v => {
-                        const wc = v.text.split(' ').filter(w => w.trim().length > 0).length;
-                        return wc >= fragmentSize; // Must have enough words for same-size fragment
-                    })
+                    .filter(v => v.text.split(' ').filter(w => w.trim().length > 0).length >= fragmentSize)
                     .sort(() => Math.random() - 0.5);
-
-                const candidateFragments: { text: string, sourceVerse: number }[] = [];
-
-                for (const otherVerse of otherVerses) {
-                    if (candidateFragments.length >= needed * 3) break;
-
-                    const otherWords = otherVerse.text.split(' ').filter(w => w.trim().length > 0);
-
-                    // Pick a random starting position that yields exactly fragmentSize words
-                    const maxStart = otherWords.length - fragmentSize;
+                for (const ov of otherVerses) {
+                    if (distractorFragments.length >= distractorCount) break;
+                    const ow = ov.text.split(' ').filter(w => w.trim().length > 0);
+                    const maxStart = Math.max(0, ow.length - fragmentSize);
                     const fStart = Math.floor(Math.random() * (maxStart + 1));
-                    const fragText = otherWords.slice(fStart, fStart + fragmentSize).join(' ');
-
-                    // Ensure no duplication with correct fragments or other candidates
-                    const isDuplicate = fragments.some(f => f.text === fragText) ||
-                        candidateFragments.some(c => c.text === fragText);
-
-                    if (!isDuplicate && fragText.length > 3) {
-                        candidateFragments.push({ text: fragText, sourceVerse: otherVerse.numberInSurah });
-                    }
+                    tryAdd(ow.slice(fStart, fStart + fragmentSize).join(' '), `p-${ov.numberInSurah}-${fStart}`);
                 }
-
-                candidateFragments.slice(0, needed).forEach((candidate, idx) => {
-                    distractorFragments.push({
-                        id: `d-${id}-${idx}`,
-                        text: candidate.text,
-                        type: 'DISTRACTOR',
-                        orderIndex: -1
-                    });
-                });
             }
 
             fragments.push(...distractorFragments);
