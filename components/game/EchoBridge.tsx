@@ -103,7 +103,8 @@ export const EchoBridge: React.FC<Props> = ({ question, feverMode, onAnswer }) =
     if (option === question.correctAnswer) {
       setTimeout(() => onAnswer(true), 1000);
     } else {
-      setTimeout(() => onAnswer(false), 1000);
+      // Give the player a moment to SEE the revealed correct answer before moving on.
+      setTimeout(() => onAnswer(false), 1900);
     }
   };
 
@@ -279,10 +280,16 @@ export const EchoBridge: React.FC<Props> = ({ question, feverMode, onAnswer }) =
                 const isCorrect = option === question.correctAnswer;
 
                 let style = "bg-slate-700/50 border-slate-600 text-slate-300 hover:bg-slate-700";
-                if (isSelected) {
-                  style = isCorrect
-                    ? "bg-green-600 border-green-400 text-white shadow-[0_0_20px_#22c55e]"
-                    : "bg-red-600 border-red-400 text-white";
+                if (selectedOption) {
+                  // Once a choice is made, always reveal the correct verse (green). The
+                  // player's wrong pick (if any) shows red so they learn the right answer.
+                  if (isCorrect) {
+                    style = "bg-green-600 border-green-400 text-white shadow-[0_0_20px_#22c55e]";
+                  } else if (isSelected) {
+                    style = "bg-red-600 border-red-400 text-white";
+                  } else {
+                    style = "bg-slate-800/40 border-slate-700 text-slate-500 opacity-60";
+                  }
                 }
 
                 return (

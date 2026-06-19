@@ -42,6 +42,8 @@ export const GameScreen: React.FC<Props> = ({ surahName, initialVerse = 1, endVe
 
   // Game State
   const [score, setScore] = useState(0);
+  const scoreRef = React.useRef(0); // synchronous mirror of score (endGame reads this, not the stale closure)
+  const addScore = (pts: number) => { scoreRef.current += pts; setScore(scoreRef.current); };
   const [lives, setLives] = useState(MAX_LIVES);
   const [streak, setStreak] = useState(0);
   const [timeLeft, setTimeLeft] = useState(TIME_BUDGET);
@@ -215,7 +217,7 @@ export const GameScreen: React.FC<Props> = ({ surahName, initialVerse = 1, endVe
       // Otherwise calculate based on generic formula
       const points = overrideScore !== undefined ? overrideScore : ((basePoints + streakBonus) * feverMultiplier);
 
-      setScore(s => s + points);
+      addScore(points);
       setStreak(s => s + 1);
       setStats(s => ({
         ...s,
@@ -270,17 +272,35 @@ export const GameScreen: React.FC<Props> = ({ surahName, initialVerse = 1, endVe
         return;
       }
 
-      setLives(l => l - 1);
       setStreak(0);
-      if (lives - 1 <= 0) {
+      const remaining = lives - 1;
+      setLives(remaining);
+      if (remaining <= 0) {
         endGame(false); // Game Over - Out of lives
+        return;
       }
-      // If player still has lives, they continue playing (component handles retry)
+
+      // BRIDGE (CLASSIC): the component reveals the correct answer, then we advance to
+      // the next verse so a wrong pick never leaves the player stuck on it — they keep
+      // going until their lives run out.
+      if (gameMode === 'CLASSIC' && levelData) {
+        const currentVerse = levelData.questions[currentQuestionIdx].verseNumber;
+        if (endVerse && currentVerse >= endVerse) {
+          endGame(true);
+          return;
+        }
+        if (currentQuestionIdx < levelData.questions.length - 1) {
+          setCurrentQuestionIdx(prev => prev + 1);
+        } else {
+          continueToNextBatch();
+        }
+      }
+      // Other modes (Assembly/Stack/Survivor) let their own component handle the retry.
     }
   }, [gameState, streak, lives, currentQuestionIdx, levelData, feverMode, endVerse, gameMode, loadNextBatchInBackground, continueToNextBatch]);
 
   const handleLevelComplete = useCallback(() => {
-    setScore(s => s + 1500); // Level completion bonus
+    addScore(1500); // Level completion bonus
 
     // Check if we should stop because of endVerse range
     const questionsCount = levelData?.questions.length || 0;
@@ -301,10 +321,12 @@ export const GameScreen: React.FC<Props> = ({ surahName, initialVerse = 1, endVe
     // Stop timer
     setGameState(victory ? GameState.VICTORY : GameState.GAME_OVER);
 
-    // If override score provided (e.g. from Memorizer), add it to current score
-    let finalScore = score;
+    // Read the live score from the ref — the `score` closure here is stale because
+    // endGame/handleLevelComplete were memoised when the level loaded (score 0).
+    let finalScore = scoreRef.current;
     if (overrideScore) {
       finalScore += overrideScore;
+      scoreRef.current = finalScore;
       setScore(finalScore);
     }
 
@@ -385,6 +407,7 @@ export const GameScreen: React.FC<Props> = ({ surahName, initialVerse = 1, endVe
   };
 
   const handleRestart = () => {
+    scoreRef.current = 0;
     setScore(0);
     setLives(MAX_LIVES);
     setStreak(0);
