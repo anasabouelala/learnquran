@@ -28,7 +28,24 @@ if (envIsBad) {
     supabaseAnonKey = LIVE_SUPABASE_ANON_KEY;
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// Drop any leftover token from the now-dead project so it can never interfere with
+// the live client's session handling.
+try { localStorage.removeItem('sb-teynsomeaopwmndoirro-auth-token'); } catch { /* ignore */ }
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        // Bypass the Web Locks API. supabase-js serializes getSession()/token refresh
+        // with navigator.locks; a stuck or cross-tab lock makes getSession() hang
+        // forever — surfacing as "Auth check timed out" and blocking sign-in entirely
+        // (a clean browser with no stored token is unaffected, which is the tell).
+        // A no-op lock runs the work immediately; a single-page app needs no cross-tab
+        // lock coordination, so this is safe and removes the deadlock.
+        lock: async (_name: string, _acquireTimeout: number, fn: () => Promise<any>) => fn(),
+    },
+});
 
 export const isSupabaseConfigured = () => {
     return !!supabaseUrl && !!supabaseAnonKey;
