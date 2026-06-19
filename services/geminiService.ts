@@ -991,52 +991,47 @@ const _generateLevelImpl = async (
 
     console.log(`[GENERATE LEVEL] ✅ Using Gemini AI for ${mode} mode`);
 
-    // --- LUDIC QUIZ MODE ---
+    // --- QUIZ MODE — authentic AI multiple-choice grounded in the REAL fetched verses.
+    // Three types: word meaning, verse meaning (tafsir), and occasion of revelation.
     if (mode === 'QUIZ') {
+        const qEnd = endVerse || (startVerse + 4);
         try {
+            // Fetch the actual verse text so nothing is misquoted by the model.
+            const surahNum = getSurahNumber(surah);
+            const verses = await fetchSurahVerses(surahNum, startVerse, qEnd);
+            if (verses.length === 0) return await generateProceduralLevel(surah, startVerse, qEnd, mode);
+
+            const verseList = verses.map(v => `${v.numberInSurah}. "${v.text}"`).join('\n');
             const response = await generateContentWithFallback(apiKey, {
-                prompt: `Generate 5 structured quiz questions for Surah ${surah} (Verses ${startVerse}-${endVerse || startVerse + 10}).
-Output Schema:
-{
-    "questions": [
-        {
-            "type": "VERSE_QUIZ",
-            "quizSubType": "SCENARIO" | "PUZZLE" | "CONNECTION" | "ORDER" | "TAFSEER",
-            "prompt": "The question text (Arabic) - DO NOT include the answer verse here!",
-            "scenario": "REQUIRED for SCENARIO: A relatable real-life situation (Arabic)",
-            "emojis": "REQUIRED for PUZZLE: 3-5 emojis matching specific words",
-            "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
-            "correctAnswer": "Exact string of correct option",
-            "explanation": "Why this is correct (Arabic)",
-            "verseNumber": number,
-            "arabicText": "Verse text"
-        }
-    ]
-}`,
-                systemInstruction: `You are an Expert Game Designer for a Quran App.
-            Your goal is to generate FUN, LUDIC, and CHALLENGING questions that connect the Quran to DAILY LIFE.
-            
-            ### CRITICAL RULES:
-            1. ⛔ **NEVER** include the answer verse in the question prompt. The player must GUESS the verse based on the scenario/clue.
-            2. 🌍 **SCENARIOS (Mawqif)**: Create relatable real-world situations where a specific verse applies.
-               - ❌ Bad: "Which verse mentions patience?"
-               - ✅ Good: "You are stuck in heavy traffic and feel your anger rising. Which verse reminds you that Allah is with the patient?"
-            3. 🧩 **PUZZLES**: Use Emojis or Word Associations.
-               - ✅ Good: "🔥 ➡️ 👠 ➡️ 🐍" (Answer: The story of Musa at the fire)
-            4. 🔗 **CONNECTIONS**: Find the "Odd One Out" or "Missing Link".
-            5. **LANGUAGE**: ALL Output (Questions, Options, Explanations) MUST be in **ARABIC (Fusha)**.
-            6. **DISTRACTORS**: Must be plausible Quranic text or related concepts. No random/silly words.
-            `,
-                jsonMode: true
+                prompt: `Surah: ${surah}\nUse ONLY these exact verses (never alter the Arabic text):\n${verseList}\n\nGenerate 5 multiple-choice questions mixing the three allowed types. Set "arabicText" to the exact verse the question is about, and "verseNumber" to its number.`,
+                systemInstruction: `You are a Quran teacher building an AUTHENTIC multiple-choice quiz. All output in Arabic (Fusha).
+Allowed question types ONLY:
+- "VOCABULARY": the meaning of ONE specific word in the verse. Prompt like «ما معنى كلمة "..." في هذه الآية؟».
+- "TAFSEER": the overall meaning / message of the verse, per authentic tafsir (e.g. As-Sa'di).
+- "ASBAB": the occasion of revelation (سبب النزول). Use this type ONLY for verses with a WELL-KNOWN, AUTHENTIC sabab from accepted narrations. If a verse has no authentic sabab, DO NOT use this type for it and NEVER invent one.
+Hard rules:
+1. NEVER fabricate meanings, tafsir, or asbab al-nuzul. Authenticity over creativity — when unsure use VOCABULARY or TAFSEER.
+2. Exactly 4 options; the correctAnswer must be VERBATIM one of the options; the 3 wrong options must be plausible and tempting, never silly or random.
+3. Keep options short; add a brief Arabic "explanation" for the correct answer.
+Output JSON: { "questions": [ { "quizSubType": "VOCABULARY"|"TAFSEER"|"ASBAB", "prompt": "...", "options": ["..","..","..",".."], "correctAnswer": "..", "explanation": "...", "verseNumber": <number>, "arabicText": "<exact verse>" } ] }`,
+                jsonMode: true,
+                modelParams: { temperature: 0.5 }
             });
 
             const text = response.text();
             const jsonStr = text.includes("```") ? text.replace(/```json/g, "").replace(/```/g, "").trim() : text;
             const data = JSON.parse(jsonStr);
+            // Keep only well-formed questions where the correct answer is actually an option.
+            const valid = (data.questions || []).filter((q: any) =>
+                q && typeof q.prompt === 'string' &&
+                Array.isArray(q.options) && q.options.length === 4 &&
+                typeof q.correctAnswer === 'string' && q.options.includes(q.correctAnswer)
+            );
+            if (valid.length === 0) return await generateProceduralLevel(surah, startVerse, qEnd, mode);
 
             return {
                 surahName: surah,
-                questions: data.questions.map((q: any, idx: number) => ({
+                questions: valid.map((q: any, idx: number) => ({
                     ...q,
                     id: `game-quiz-${Date.now()}-${idx}`,
                     points: 500,
@@ -1045,7 +1040,7 @@ Output Schema:
             };
         } catch (e) {
             console.error("Quiz Gen Error:", e);
-            return await generateProceduralLevel(surah, startVerse, endVerse || startVerse + 5, mode);
+            return await generateProceduralLevel(surah, startVerse, qEnd, mode);
         }
     }
 

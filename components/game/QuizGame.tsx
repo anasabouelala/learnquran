@@ -46,6 +46,7 @@ export const QuizGame: React.FC<Props> = ({ question, onAnswer }) => {
         switch (type) {
             case 'VOCABULARY': return { label: 'معاني الكلمات', icon: <Tag size={16} />, color: 'text-blue-400 bg-blue-900/20' };
             case 'TAFSEER': return { label: 'التفسير العام', icon: <BookOpen size={16} />, color: 'text-emerald-400 bg-emerald-900/20' };
+            case 'ASBAB': return { label: 'سبب النزول', icon: <Book size={16} />, color: 'text-amber-400 bg-amber-900/20' };
             case 'THEME': return { label: 'هدايات الآيات', icon: <Brain size={16} />, color: 'text-purple-400 bg-purple-900/20' };
             case 'PRECISION': return { label: 'ضبط اللفظ', icon: <CheckCircle size={16} />, color: 'text-orange-400 bg-orange-900/20' };
             default: return { label: 'اختبار شامل', icon: <HelpCircle size={16} />, color: 'text-slate-400 bg-slate-900/20' };
@@ -67,7 +68,7 @@ export const QuizGame: React.FC<Props> = ({ question, onAnswer }) => {
                     </div>
                     <div>
                         <h3 className="text-white font-arcade text-sm tracking-widest uppercase opacity-90">{catInfo.label}</h3>
-                        <p className="text-slate-400 text-xs mt-0.5 font-medium">Surah {question.verseNumber}</p>
+                        <p className="text-slate-400 text-xs mt-0.5 font-medium">{question.verseNumber ? `الآية ${question.verseNumber}` : 'سؤال عام'}</p>
                     </div>
                 </div>
 

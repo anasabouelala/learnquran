@@ -280,9 +280,9 @@ export const GameScreen: React.FC<Props> = ({ surahName, initialVerse = 1, endVe
         return;
       }
 
-      // BRIDGE (CLASSIC): the component reveals the correct answer, then we advance to
-      // the next verse so a wrong pick never leaves the player stuck on it — they keep
-      // going until their lives run out.
+      // "Answer then move on" modes (Bridge, Quiz): the component reveals the correct
+      // answer, then we advance so a wrong pick never locks the board — it just costs a
+      // life, and play continues until lives run out.
       if (gameMode === 'CLASSIC' && levelData) {
         const currentVerse = levelData.questions[currentQuestionIdx].verseNumber;
         if (endVerse && currentVerse >= endVerse) {
@@ -293,6 +293,12 @@ export const GameScreen: React.FC<Props> = ({ surahName, initialVerse = 1, endVe
           setCurrentQuestionIdx(prev => prev + 1);
         } else {
           continueToNextBatch();
+        }
+      } else if (gameMode === 'QUIZ' && levelData) {
+        if (currentQuestionIdx < levelData.questions.length - 1) {
+          setCurrentQuestionIdx(prev => prev + 1);
+        } else {
+          handleLevelComplete();
         }
       }
       // Other modes (Assembly/Stack/Survivor) let their own component handle the retry.
