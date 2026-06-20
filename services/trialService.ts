@@ -1,73 +1,60 @@
 
-const TRIAL_KEY = 'hafed_trial';
+// Time-based free trial: new users get full access for TRIAL_DAYS, after which the app
+// prompts them to subscribe (a closable popup + a permanent header). The clock starts at
+// account creation for signed-in users (so it can't be reset by clearing storage) and
+// falls back to a device-local "first seen" timestamp for guests.
+const TRIAL_DAYS = 2;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const START_KEY = 'hafed_trial_start';
 
-const MAX_GAMES = 2;
-const MAX_ANALYSIS = 1;
-
-interface TrialData {
-    gamesPlayed: number;
-    analysisPlayed: number;
-    dateKey: string; // YYYY-MM-DD — trial resets daily so new visitors always get a fresh taste
-}
-
-function todayKey(): string {
-    return new Date().toISOString().split('T')[0];
-}
-
-function load(): TrialData {
+function localStartMs(): number {
     try {
-        const raw = localStorage.getItem(TRIAL_KEY);
-        if (!raw) return { gamesPlayed: 0, analysisPlayed: 0, dateKey: todayKey() };
-        return JSON.parse(raw);
+        const raw = localStorage.getItem(START_KEY);
+        if (raw) {
+            const n = parseInt(raw, 10);
+            if (!Number.isNaN(n)) return n;
+        }
+        const now = Date.now();
+        localStorage.setItem(START_KEY, String(now));
+        return now;
     } catch {
-        return { gamesPlayed: 0, analysisPlayed: 0, dateKey: todayKey() };
+        return Date.now();
     }
 }
 
-function save(data: TrialData) {
-    localStorage.setItem(TRIAL_KEY, JSON.stringify(data));
+function startMs(createdAt?: string | null): number {
+    // Prefer the account's creation time — robust, and can't be gamed by clearing storage.
+    if (createdAt) {
+        const t = Date.parse(createdAt);
+        if (!Number.isNaN(t)) return t;
+    }
+    return localStartMs();
 }
 
 export const trialService = {
-    /** Returns remaining plays for both categories */
-    getRemaining(): { games: number; analysis: number } {
-        const d = load();
-        return {
-            games: Math.max(0, MAX_GAMES - d.gamesPlayed),
-            analysis: Math.max(0, MAX_ANALYSIS - d.analysisPlayed),
-        };
+    TRIAL_DAYS,
+
+    /** Seed the device-local start now (first app load) so a guest's clock begins immediately. */
+    ensureStarted(): void {
+        try { localStartMs(); } catch { /* ignore */ }
     },
 
-    /** Can the user start a game? */
-    canPlayGame(): boolean {
-        return load().gamesPlayed < MAX_GAMES;
+    /** Milliseconds left in the trial (0 once it has ended). */
+    msLeft(createdAt?: string | null): number {
+        const endsAt = startMs(createdAt) + TRIAL_DAYS * DAY_MS;
+        return Math.max(0, endsAt - Date.now());
     },
 
-    /** Can the user start a Quran analysis / diagnostic? */
-    canPlayAnalysis(): boolean {
-        return load().analysisPlayed < MAX_ANALYSIS;
+    /** Whole days left, rounded up — shows the final 24 hours as "1 يوم". */
+    daysLeft(createdAt?: string | null): number {
+        return Math.ceil(this.msLeft(createdAt) / DAY_MS);
     },
 
-    /** Call this AFTER successfully starting a game */
-    recordGame() {
-        const d = load();
-        d.gamesPlayed = Math.min(d.gamesPlayed + 1, MAX_GAMES);
-        save(d);
+    isActive(createdAt?: string | null): boolean {
+        return this.msLeft(createdAt) > 0;
     },
 
-    /** Call this AFTER successfully starting an analysis */
-    recordAnalysis() {
-        const d = load();
-        d.analysisPlayed = Math.min(d.analysisPlayed + 1, MAX_ANALYSIS);
-        save(d);
+    isEnded(createdAt?: string | null): boolean {
+        return this.msLeft(createdAt) <= 0;
     },
-
-    /** True when both quotas are exhausted */
-    isExhausted(): boolean {
-        const d = load();
-        return d.gamesPlayed >= MAX_GAMES && d.analysisPlayed >= MAX_ANALYSIS;
-    },
-
-    MAX_GAMES,
-    MAX_ANALYSIS,
 };

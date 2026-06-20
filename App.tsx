@@ -67,13 +67,32 @@ const App: React.FC = () => {
 
   // ─── Trial / Paywall State ────────────────────────────────────────────────
   const [showPaywall, setShowPaywall] = useState(false);
-  const [paywallReason, setPaywallReason] = useState<'game' | 'analysis'>('game');
+  const [paywallReason, setPaywallReason] = useState<'game' | 'analysis' | 'trial'>('game');
   const [showPremiumWelcome, setShowPremiumWelcome] = useState(false);
 
   const isPremium = user?.isAdmin === true;
   const isPlayingOrDiagnostic = appState === GameState.PLAYING || appState === GameState.DIAGNOSTIC;
-  const showTrialBanner = !!user && !isPremium && !isPlayingOrDiagnostic && appState !== GameState.MENU;
+  // Time-based free trial (2 days). The clock is the account's created_at (guests fall back
+  // to a device timestamp). Premium users are exempt.
+  const trialEnded = !isPremium && trialService.isEnded(user?.createdAt);
+  const trialDaysLeft = trialService.daysLeft(user?.createdAt);
+  // Permanent header once the trial ends (everywhere except active gameplay); during the
+  // active trial it's a gentle "days left" nudge shown off the main menu.
+  const showTrialBanner = !!user && !isPremium && !isPlayingOrDiagnostic && (trialEnded || appState !== GameState.MENU);
   const showReferralBanner = !!user && isPremium && !isPlayingOrDiagnostic;
+
+  // Start the trial clock for guests on first load.
+  useEffect(() => { trialService.ensureStarted(); }, []);
+
+  // When the trial has ended, surface the closable popup once per session (the permanent
+  // header stays regardless). Wait for auth to resolve so premium users never see it.
+  useEffect(() => {
+    if (!authLoading && trialEnded && !sessionStorage.getItem('hafed_trial_popup_seen')) {
+      setPaywallReason('trial');
+      setShowPaywall(true);
+      try { sessionStorage.setItem('hafed_trial_popup_seen', '1'); } catch { /* ignore */ }
+    }
+  }, [authLoading, trialEnded]);
 
   // ─── License Activation ──────────────────────────────────────────────────
   const [licenseKey, setLicenseKey] = useState('');
@@ -235,8 +254,8 @@ const App: React.FC = () => {
     mode: GameMode = 'CLASSIC',
     config?: any,
   ) => {
-    if (!isPremium && !trialService.canPlayGame()) {
-      setPaywallReason('game');
+    if (!isPremium && trialService.isEnded(user?.createdAt)) {
+      setPaywallReason('trial');
       setShowPaywall(true);
       return;
     }
@@ -245,20 +264,18 @@ const App: React.FC = () => {
     setSelectedGameMode(mode);
     setGameConfig(config || {});
     setAppState(GameState.PLAYING);
-    if (!isPremium) trialService.recordGame();
-  }, [isPremium]);
+  }, [isPremium, user]);
 
   const handleStartDiagnostic = useCallback((surah: string, startVerse: number = 1, endVerse?: number) => {
-    if (!isPremium && !trialService.canPlayAnalysis()) {
-      setPaywallReason('analysis');
+    if (!isPremium && trialService.isEnded(user?.createdAt)) {
+      setPaywallReason('trial');
       setShowPaywall(true);
       return;
     }
     setSelectedSurah(surah);
     setVerseRange({ start: startVerse, end: endVerse });
     setAppState(GameState.DIAGNOSTIC);
-    if (!isPremium) trialService.recordAnalysis();
-  }, [isPremium]);
+  }, [isPremium, user]);
 
   const handleDiagnosticComplete = useCallback((surah: string, startVerse: number, endVerse?: number) => {
     setMenuInitialState({ step: 'SELECT_MODE', surah, range: { start: startVerse, end: endVerse } });
@@ -369,7 +386,7 @@ const App: React.FC = () => {
 
   return (
     <div className={`antialiased font-sans text-white
-      ${showTrialBanner ? 'pt-[112px] sm:pt-[74px]' : ''}
+      ${showTrialBanner ? 'pt-[80px] sm:pt-[60px]' : ''}
       ${showReferralBanner ? 'pt-[52px]' : ''}
     `}>
 
@@ -378,7 +395,7 @@ const App: React.FC = () => {
 
       {/* ─── Trial Banner (free users) ──────── */}
       {showTrialBanner && (
-        <TrialBanner onUpgrade={() => { setPaywallReason('game'); setShowPaywall(true); }} gumroadUrl={userGumroadUrl} />
+        <TrialBanner daysLeft={trialDaysLeft} ended={trialEnded} gumroadUrl={userGumroadUrl} />
       )}
 
       {/* ─── Paywall Modal ───────────────────── */}

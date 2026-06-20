@@ -6,7 +6,7 @@ import { X, Zap, Lock, CheckCircle } from 'lucide-react';
 interface PaywallModalProps {
     open: boolean;
     onClose: () => void;
-    reason?: 'game' | 'analysis';
+    reason?: 'game' | 'analysis' | 'trial';
     gumroadUrl: string;
 }
 
@@ -59,7 +59,9 @@ export const PaywallModal: React.FC<PaywallModalProps> = ({ open, onClose, reaso
                             <p className="text-slate-400 text-sm text-center mb-6 leading-relaxed">
                                 {reason === 'analysis'
                                     ? 'لقد استخدمت تحليل التلاوة المجاني. اشترك للحصول على استعمال غير محدود.'
-                                    : 'لقد استخدمت جلستَي اللعب المجانيتين. اشترك للحصول على استعمال غير محدود.'}
+                                    : reason === 'trial'
+                                        ? 'انتهت فترتك التجريبية المجانية (يومان). اشترك لمواصلة الاستعمال الكامل بلا حدود.'
+                                        : 'لقد استخدمت جلستَي اللعب المجانيتين. اشترك للحصول على استعمال غير محدود.'}
                             </p>
 
                             {/* Feature bullets */}

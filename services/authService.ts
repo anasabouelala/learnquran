@@ -113,7 +113,8 @@ export const authService = {
                     badges: [],
                     accuracy: 0,
                     totalGamesPlayed: 0,
-                    isAdmin: ADMIN_EMAILS.has(email)
+                    isAdmin: ADMIN_EMAILS.has(email),
+                    createdAt: session.user.created_at,
                 };
             }
 
@@ -158,6 +159,7 @@ export const authService = {
                 accuracy: Math.round(avgAccuracy),
                 totalGamesPlayed: gamesCount,
                 isAdmin: ADMIN_EMAILS.has(profileEmail) || profile.is_admin === true || premiumActive,
+                createdAt: profile.created_at,
                 currentSurah: recentProgress ? {
                     name: recentProgress.surah_name,
                     progress: Math.round(recentProgress.mastery_level || 0)

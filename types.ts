@@ -161,4 +161,6 @@ export interface UserProfile {
   };
   totalGamesPlayed: number;
   isAdmin?: boolean;
+  /** ISO timestamp of account creation — drives the time-based free trial. */
+  createdAt?: string;
 }
