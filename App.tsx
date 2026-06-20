@@ -45,6 +45,8 @@ const App: React.FC = () => {
   // Determine initial state from current URL
   const initialState = PATH_TO_STATE[window.location.pathname] ?? GameState.MENU;
   const [appState, setAppState] = useState<GameState>(initialState);
+  const appStateRef = React.useRef(appState); // current appState for stale-closure-free reads
+  React.useEffect(() => { appStateRef.current = appState; }, [appState]);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
@@ -159,7 +161,7 @@ const App: React.FC = () => {
           setUser(currentUser);
 
           // Auto-direct to dashboard if logged in and currently on the landing/menu state
-          if (currentUser && appState === GameState.MENU) {
+          if (currentUser && appStateRef.current === GameState.MENU) {
             setAppState(GameState.DASHBOARD);
           }
         }
@@ -177,8 +179,8 @@ const App: React.FC = () => {
     const { data } = authService.onAuthStateChange((u) => {
       if (!unmounted) {
         setUser(u);
-        // Also auto-direct to dashboard upon login
-        if (u && appState === GameState.MENU) {
+        // Also auto-direct to dashboard upon login (current state, not stale closure)
+        if (u && appStateRef.current === GameState.MENU) {
           setAppState(GameState.DASHBOARD);
         }
       }

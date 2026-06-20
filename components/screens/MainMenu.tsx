@@ -300,8 +300,10 @@ export const MainMenu: React.FC<Props> = ({ onStartGame, onStartDiagnostic, onOp
         try {
             if (authMode === 'LOGIN') {
                 await authService.signIn(email, password);
-                // App.tsx onAuthStateChange will update propUser → triggers auto-forward to Dashboard
-                setStep('USER_HOME');
+                // Go straight to the dashboard. Don't rely on App's async auth-state
+                // listener (it can lag or fail on the profile re-fetch, leaving the user
+                // stuck on the menu).
+                onOpenDashboard();
             } else {
                 await authService.signUp(email, password, name);
                 alert("Account created! Please sign in.");
