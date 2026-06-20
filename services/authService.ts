@@ -8,8 +8,20 @@ const ADMIN_EMAILS = new Set([
     'anasabouelala@gmail.com', // owner — full access forever
 ]);
 
+// Dedupe concurrent getCurrentUser calls — App init and the auth-state listener fire
+// it at the same moment; sharing one in-flight result avoids the network contention
+// (and double slow-path) that was tipping auth past its timeout.
+let _currentUserInFlight: Promise<UserProfile | null> | null = null;
+
 export const authService = {
     async getCurrentUser(): Promise<UserProfile | null> {
+        if (_currentUserInFlight) return _currentUserInFlight;
+        _currentUserInFlight = this._loadCurrentUser();
+        try { return await _currentUserInFlight; }
+        finally { _currentUserInFlight = null; }
+    },
+
+    async _loadCurrentUser(): Promise<UserProfile | null> {
         try {
             const { data: { session }, error: sessionError } = await supabase.auth.getSession();
             if (sessionError || !session?.user) return null;
@@ -47,6 +59,27 @@ export const authService = {
                     }
                 } catch (apiErr) {
                     console.error('Failed to claim shadow profile API call', apiErr);
+                }
+            }
+
+            // No existing or shadow profile — create one now so the account is "healed":
+            // future loads find it immediately and skip the slow claim path that was
+            // timing auth out (and jamming sign-in) for users with no profile row.
+            if (!profile && session.user.email) {
+                try {
+                    const { data: created } = await supabase
+                        .from('profiles')
+                        .insert({
+                            auth_user_id: session.user.id,
+                            email: session.user.email.toLowerCase().trim(),
+                            full_name: session.user.user_metadata?.full_name || session.user.email.split('@')[0] || 'User',
+                            level: 1, xp: 0, streak: 0,
+                        })
+                        .select('*')
+                        .maybeSingle();
+                    if (created) { profile = created; error = null; }
+                } catch (createErr) {
+                    console.warn('[Auth] Could not create profile, using fallback:', createErr);
                 }
             }
 

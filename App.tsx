@@ -148,7 +148,7 @@ const App: React.FC = () => {
       try {
         setLoadingStatus('Checking Supabase connection...');
         const timeoutPromise = new Promise<null>((_, reject) =>
-          setTimeout(() => reject(new Error('Auth check timed out')), 5000)
+          setTimeout(() => reject(new Error('Auth check timed out')), 8000)
         );
         setLoadingStatus('Fetching user session...');
         const currentUser = await Promise.race([
