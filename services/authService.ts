@@ -13,10 +13,29 @@ const ADMIN_EMAILS = new Set([
 // (and double slow-path) that was tipping auth past its timeout.
 let _currentUserInFlight: Promise<UserProfile | null> | null = null;
 
+// Reject if a promise doesn't settle in time. fetch()/supabase calls have no built-in
+// timeout, so one stalled network request could otherwise hang sign-in or the initial
+// auth check indefinitely (spinner stuck on the login page until a manual refresh).
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+        p.then(
+            (v) => { clearTimeout(t); resolve(v); },
+            (e) => { clearTimeout(t); reject(e); },
+        );
+    });
+}
+
 export const authService = {
     async getCurrentUser(): Promise<UserProfile | null> {
         if (_currentUserInFlight) return _currentUserInFlight;
-        _currentUserInFlight = this._loadCurrentUser();
+        // Hard cap the whole load so a stalled request can't wedge this shared in-flight
+        // promise (every later caller awaits it) and hang auth until a refresh.
+        _currentUserInFlight = withTimeout(this._loadCurrentUser(), 9000, 'getCurrentUser')
+            .catch((e: any) => {
+                console.warn('[Auth] getCurrentUser failed/timed out:', e?.message || e);
+                return null;
+            });
         try { return await _currentUserInFlight; }
         finally { _currentUserInFlight = null; }
     },
@@ -155,12 +174,28 @@ export const authService = {
     },
 
     async signIn(email: string, password: string) {
-        const { data, error } = await supabase.auth.signInWithPassword({
-            email,
-            password
-        });
-        if (error) throw error;
-        return data.user;
+        try {
+            const { data, error } = await withTimeout(
+                supabase.auth.signInWithPassword({ email, password }),
+                10000,
+                'signIn',
+            );
+            if (error) throw error;
+            return data.user;
+        } catch (e: any) {
+            // A stalled response can hang the request even though the session was actually
+            // established server-side — check before failing so we don't strand the user
+            // on a spinner.
+            if (typeof e?.message === 'string' && e.message.includes('timed out')) {
+                try {
+                    const { data: { session } } = await withTimeout(
+                        supabase.auth.getSession(), 3000, 'getSession');
+                    if (session?.user) return session.user;
+                } catch { /* fall through to the retry error */ }
+                throw new Error('تعذّر الاتصال بالخادم، يرجى المحاولة مرة أخرى.');
+            }
+            throw e;
+        }
     },
 
     async signUp(email: string, password: string, name: string) {
@@ -312,21 +347,23 @@ export const authService = {
     },
 
     onAuthStateChange(callback: (user: UserProfile | null) => void) {
-        return supabase.auth.onAuthStateChange(async (_event, session) => {
+        // IMPORTANT: this listener is intentionally NOT async and never awaits inside it.
+        // supabase-js awaits auth-state subscribers while completing signInWithPassword, so
+        // awaiting a slow/stalled profile fetch here would hang the sign-in call itself —
+        // the user would sit on the login page with a spinner until a manual refresh.
+        // Resolve the profile out of band and push it through the callback when it's ready.
+        return supabase.auth.onAuthStateChange((_event, session) => {
             if (session?.user) {
-                try {
-                    // Fetch full profile again
-                    const user = await this.getCurrentUser();
-                    callback(user);
-                } catch (error: any) {
-                    if (error.name === 'AbortError' || error.message?.includes('aborted')) {
-                        console.log('Ignored abort error during auth state change');
-                    } else {
-                        console.error('Error fetching user on auth change:', error);
-                    }
-                    // We might not want to callback(null) here because the user IS logged in, 
-                    // we just failed to fetch the profile.
-                }
+                this.getCurrentUser()
+                    .then((user) => callback(user))
+                    .catch((error: any) => {
+                        if (error?.name === 'AbortError' || error?.message?.includes('aborted')) {
+                            console.log('Ignored abort error during auth state change');
+                        } else {
+                            console.error('Error fetching user on auth change:', error);
+                        }
+                        // Keep the user signed in; we just couldn't hydrate the profile now.
+                    });
             } else {
                 callback(null);
             }
